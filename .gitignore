@@ -1,0 +1,16 @@
+# Kernel build artifacts
+*.ko
+*.o
+*.mod
+*.mod.c
+*.order
+*.symvers
+.*.cmd
+.tmp_versions/
+Module.symvers
+modules.order
+
+# Userspace binaries
+throttleClient
+throttleTest
+throttleTest2

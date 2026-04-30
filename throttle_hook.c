@@ -99,7 +99,6 @@ int install_hook(int nr)
     sys_call_table_ptr[nr] = generic_sct_wrapper;
     end_syscall_table_hack();
     mb();
-    set_bit(nr, hooked_mask);
 
     printk(KERN_INFO "<throttle>: [HOOK+] nr=%d orig=%px\n",
            nr, (void *)hooks[i].orig_fn);
@@ -117,10 +116,8 @@ void remove_hook(int nr)
             //ripristino dell'handler originale sulla sys_call_table
             begin_syscall_table_hack();
             sys_call_table_ptr[nr] = hooks[i].orig_fn;
-            //aggiornamento della maschera e dello stato dell'hook
             end_syscall_table_hack();
             mb();
-            clear_bit(nr, hooked_mask);
             hooks[i].active = 0;
             printk(KERN_INFO "<throttle>: [HOOK-] nr=%d ripristinato\n", nr);
             break;

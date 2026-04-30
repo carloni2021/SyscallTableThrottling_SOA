@@ -28,13 +28,10 @@
 #include <asm/special_insns.h>
 #include <asm/msr.h>
 #include <asm/io.h>
-#include <linux/bitmap.h>
 #include <linux/stop_machine.h>
 #include <linux/vmalloc.h>
 #include <asm/set_memory.h>
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
-#include <linux/execmem.h>      /* execmem_alloc / execmem_free (rimpiazza module_alloc) */
-#else
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 4, 0)
 #include <linux/moduleloader.h> /* module_alloc / vfree */
 #endif
 
@@ -139,7 +136,6 @@ extern int               module_unloading;
 extern spinlock_t        config_lock;
 
 extern atomic_t          call_count;
-extern unsigned long     hooked_mask[BITS_TO_LONGS(NR_syscalls)];
 extern wait_queue_head_t throttle_wq;
 
 /* ================================================================
@@ -179,8 +175,7 @@ void write_cr0_forced(unsigned long val);
  * ================================================================ */
 
 int find_sys_call_table(void);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0) && \
-    LINUX_VERSION_CODE <  KERNEL_VERSION(6, 4, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
 int  find_x64_sys_call(void);
 int  patch_x64_sys_call(void);
 void restore_x64_sys_call(void);

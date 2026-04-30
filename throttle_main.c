@@ -27,8 +27,6 @@ int  module_unloading = 0;
 DEFINE_SPINLOCK(config_lock);
 
 atomic_t call_count = ATOMIC_INIT(0);
-//bitmap per tenere traccia delle syscall hookate, usato in throttle_hook.c
-DECLARE_BITMAP(hooked_mask, NR_syscalls);
 //wait queue per le code di attesa in throttle_check
 DECLARE_WAIT_QUEUE_HEAD(throttle_wq);
 
@@ -62,13 +60,10 @@ static int __init throttle_init(void)
         return ret;
     }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0) && \
-    LINUX_VERSION_CODE <  KERNEL_VERSION(6, 4, 0)
-    /* Trova x64_sys_call via LSTAR scan (nessun kprobe: evita freeze in
-     * kprobes_module_going durante delete_module).
-     * La patch installa JMP → stub allocato esternamente al modulo.
-     * Disabilitato su kernel >= 6.4: execmem_alloc e set_memory_x non sono
-     * esportati ai moduli. Su questi kernel il solo SCT hooking è sufficiente. */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
+    /* Trova x64_sys_call via LSTAR scan e la patcha con JMP → stub esterno.
+     * Necessario su kernel >= 5.15 dove il dispatch usa x64_sys_call()
+     * anziché sys_call_table direttamente. */
     if (!find_x64_sys_call()) {
         if (patch_x64_sys_call())
             printk(KERN_WARNING "<throttle>: patch x64_sys_call fallita (non fatale)\n");
@@ -114,8 +109,7 @@ static void __exit throttle_exit(void)
     /* [6] Quiescence 2: barriera finale su tutti i CPU */
     synchronize_rcu();
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0) && \
-    LINUX_VERSION_CODE <  KERNEL_VERSION(6, 4, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
     /* [7] Ripristina x64_sys_call e libera lo stub esterno. */
     restore_x64_sys_call();
     printk(KERN_INFO "<throttle>: exit [7] x64_sys_call ripristinata\n");

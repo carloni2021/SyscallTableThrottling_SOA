@@ -106,22 +106,62 @@ int find_sys_call_table(void)
  *  X64_SYS_CALL FINDER + PATCH TRAMITE STUB ESTERNO (kernel >= 5.15)
  * ================================================================ */
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0) && \
-    LINUX_VERSION_CODE <  KERNEL_VERSION(6, 4, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
 
 static unsigned long x64_sys_call_addr = 0;
 static char x64_orig_bytes[5];
 static char x64_jump_inst[5];
 static void *x64_stub = NULL;   /* allocato con module_alloc, fuori dal modulo */
 
-/* Su kernel >= 6.4, module_alloc/module_memfree sono stati rimossi.
- * Il sostituto è execmem_alloc(EXECMEM_MODULE_TEXT) / execmem_free(). */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
-#  define stub_alloc()  execmem_alloc(EXECMEM_MODULE_TEXT, PAGE_SIZE)
-#  define stub_free(p)  execmem_free(p)
-#else
-#  define stub_alloc()  module_alloc(PAGE_SIZE)
-#  define stub_free(p)  vfree(p)
+/*
+ * execmem_alloc, execmem_free, set_memory_x non sono EXPORT_SYMBOL su >= 6.4:
+ * li risolviamo a runtime via kprobe (register+unregister immediato, solo per
+ * ricavare l'indirizzo; nessun kprobe resta attivo dopo la risoluzione).
+ */
+#include <linux/kprobes.h>
+
+typedef void *(*fn_execmem_alloc_t)(unsigned int type, size_t size);
+typedef void  (*fn_execmem_free_t)(void *ptr);
+typedef int   (*fn_set_memory_x_t)(unsigned long addr, int numpages);
+
+static fn_execmem_alloc_t fn_execmem_alloc;
+static fn_execmem_free_t  fn_execmem_free;
+static fn_set_memory_x_t  fn_set_memory_x;
+
+static unsigned long lookup_unexported(const char *name)
+{
+    struct kprobe kp = { .symbol_name = name };
+    unsigned long addr;
+    if (register_kprobe(&kp) < 0) return 0;
+    addr = (unsigned long)kp.addr;
+    unregister_kprobe(&kp);
+    return addr;
+}
+
+static int resolve_stub_fns(void)
+{
+    fn_execmem_alloc = (fn_execmem_alloc_t)lookup_unexported("execmem_alloc");
+    fn_execmem_free  = (fn_execmem_free_t) lookup_unexported("execmem_free");
+    fn_set_memory_x  = (fn_set_memory_x_t) lookup_unexported("set_memory_x");
+    if (!fn_execmem_alloc || !fn_execmem_free || !fn_set_memory_x) {
+        printk(KERN_ERR "<throttle>: risoluzione execmem/set_memory_x fallita\n");
+        return -ENOENT;
+    }
+    printk(KERN_INFO "<throttle>: execmem_alloc=%px execmem_free=%px set_memory_x=%px\n",
+           (void *)fn_execmem_alloc, (void *)fn_execmem_free, (void *)fn_set_memory_x);
+    return 0;
+}
+
+/* EXECMEM_MODULE_TEXT == 0 (primo valore dell'enum execmem_type) */
+#  define stub_alloc()          fn_execmem_alloc(0, PAGE_SIZE)
+#  define stub_free(p)          fn_execmem_free(p)
+#  define stub_set_memory_x(a)  fn_set_memory_x((unsigned long)(a), 1)
+
+#else  /* kernel < 6.4 */
+#  define stub_alloc()          module_alloc(PAGE_SIZE)
+#  define stub_free(p)          vfree(p)
+#  define stub_set_memory_x(a)  set_memory_x((unsigned long)(a), 1)
 #endif
 
 /* Scansiona func cercando cmp imm ∈ [256,600] poi CALL; ritorna la CALL target. */
@@ -266,6 +306,11 @@ static int alloc_x64_stub(void)
     struct text_patch_data pd;
     int ret;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
+    ret = resolve_stub_fns();
+    if (ret) return ret;
+#endif
+
     /* Costruisce il machine code del stub */
     stub_code[0]  = 0x49; stub_code[1]  = 0xBA;  /* movabs r10, imm64 */
     memcpy(stub_code + 2, &sct_addr, 8);           /* SCT addr hardcoded */
@@ -290,8 +335,8 @@ static int alloc_x64_stub(void)
         return ret;
     }
 
-    /* Rende la pagina eseguibile (necessario su kernel con W^X enforcement) */
-    ret = set_memory_x((unsigned long)x64_stub, 1);
+    /* Rende la pagina eseguibile */
+    ret = stub_set_memory_x(x64_stub);
     if (ret) {
         printk(KERN_ERR "<throttle>: set_memory_x stub fallita (%d)\n", ret);
         stub_free(x64_stub);
