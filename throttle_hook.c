@@ -70,6 +70,7 @@ static asmlinkage long generic_sct_wrapper(const struct pt_regs *regs)
     return orig_fn(regs);
 }
 
+// Installa un hook sulla syscall nr: sostituisce sys_call_table[nr] con generic_sct_wrapper e salva l'handler originale in hooks[]. Ritorna 0 se successo, -ENODEV se sys_call_table non trovata, -ENOMEM se non ci sono slot liberi per nuovi hook.
 int install_hook(int nr)
 {
     int i;
@@ -126,6 +127,8 @@ void remove_hook(int nr)
     mutex_unlock(&hook_mutex);
 }
 
+
+// Rimuove tutti gli hook attivi, usata durante unload per assicurare che la sys_call_table sia ripristinata allo stato originale.
 void remove_all_hooks(void)
 {
     int i;

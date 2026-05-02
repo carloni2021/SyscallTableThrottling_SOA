@@ -4,7 +4,7 @@
  *
  * sys_call_table: scansione del virtual address space [0xffffffff00000000, MAX)
  *   con heuristica su 7 indici noti di sys_ni_syscall.
- *   Basato su usctm.c di Francesco Quaglia (GPL-2.0).
+ *   Basato su usctm.c del prof. Francesco Quaglia.
  *
  * x64_sys_call (kernel >= 5.15), percorso unico:
  *   LSTAR MSR → entry_SYSCALL_64 → scan do_syscall_64
@@ -32,9 +32,10 @@
  *  SYS_CALL_TABLE FINDER — scansione [0xffffffff00000000, MAX)
  * ================================================================ */
 
+//indici noti di sys_ni_syscall in sys_call_table, usati per identificare la posizione della tabella durante la scansione del virtual address space.
 #define SCT_START  0xffffffff00000000ULL
 #define SCT_MAX    0xfffffffffff00000ULL
-#define NI_1  134
+//Questi indici sono stati identificati empiricamente su diverse versioni del kernel e sono generalmente stabili, ma potrebbero variare in future versioni del kernel.
 #define NI_2  174
 #define NI_3  182
 #define NI_4  183
@@ -45,6 +46,7 @@
 syscall_fn_t     *sys_call_table_ptr = NULL;
 static unsigned long *hacked_ni_syscall  = NULL;
 
+// Verifica se i 7 indici noti di sys_ni_syscall in addr puntano allo stesso valore (e non sono nulli o piccoli), per identificare una potenziale sys_call_table.
 static int sct_good_area(unsigned long *addr)
 {
     int i;
@@ -53,6 +55,7 @@ static int sct_good_area(unsigned long *addr)
     return 1;
 }
 
+// Scansiona la memoria a partire da SCT_START, pagina per pagina, verificando se è mappata e se contiene una potenziale sys_call_table tramite sct_validate_page.
 static int sct_validate_page(unsigned long *addr)
 {
     int i;
@@ -84,6 +87,8 @@ static int sct_validate_page(unsigned long *addr)
     return 0;
 }
 
+// Scansiona il virtual address space da SCT_START a SCT_MAX, pagina per pagina, per trovare sys_call_table tramite sct_validate_page che viene lanciata se la pagina è mappata.
+//  Restituisce 0 se trovata, -ENOENT altrimenti.
 int find_sys_call_table(void)
 {
     unsigned long k;
@@ -109,15 +114,18 @@ int find_sys_call_table(void)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
 
 static unsigned long x64_sys_call_addr = 0;
+//buffer che contiene i byte originali di x64_sys_call sovrascritti dallo stub, usato per ripristinare la funzione durante unload.
 static char x64_orig_bytes[5];
 static char x64_jump_inst[5];
+
 static void *x64_stub = NULL;   /* allocato con module_alloc, fuori dal modulo */
 
+
+//blocco kernel v 6.4+ : execmem_alloc, execmem_free e set_memory_x non sono più esportate, vengono risolte a runtime via kprobe in resolve_stub_fns().
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
 /*
  * execmem_alloc, execmem_free, set_memory_x non sono EXPORT_SYMBOL su >= 6.4:
- * li risolviamo a runtime via kprobe (register+unregister immediato, solo per
- * ricavare l'indirizzo; nessun kprobe resta attivo dopo la risoluzione).
+ * vengono tisolti a runtime via kprobe (register+unregister immediato nessun kprobe resta attivo dopo la risoluzione).
  */
 #include <linux/kprobes.h>
 
@@ -129,6 +137,8 @@ static fn_execmem_alloc_t fn_execmem_alloc;
 static fn_execmem_free_t  fn_execmem_free;
 static fn_set_memory_x_t  fn_set_memory_x;
 
+// Usa kprobe per risolvere l'indirizzo di una funzione non esportata; ritorna 0 se fallisce.
+//Aggira il problema che kallsyms_lookup_name non è EXPORT_SYMBOL su kernel recenti, e che execmem_alloc/free e set_memory_x non sono più esportate su >= 6.4.
 static unsigned long lookup_unexported(const char *name)
 {
     struct kprobe kp = { .symbol_name = name };
@@ -139,6 +149,7 @@ static unsigned long lookup_unexported(const char *name)
     return addr;
 }
 
+// Risolve gli indirizzi di execmem_alloc, execmem_free e set_memory_x a runtime usando lookup_unexported. Ritorna 0 se fallisce.
 static int resolve_stub_fns(void)
 {
     fn_execmem_alloc = (fn_execmem_alloc_t)lookup_unexported("execmem_alloc");
@@ -158,15 +169,18 @@ static int resolve_stub_fns(void)
 #  define stub_free(p)          fn_execmem_free(p)
 #  define stub_set_memory_x(a)  fn_set_memory_x((unsigned long)(a), 1)
 
+// Per kernel < 6.4, usiamo module_alloc, vfree e set_memory_x direttamente.
 #else  /* kernel < 6.4 */
 #  define stub_alloc()          module_alloc(PAGE_SIZE)
 #  define stub_free(p)          vfree(p)
 #  define stub_set_memory_x(a)  set_memory_x((unsigned long)(a), 1)
 #endif
 
-/* Scansiona func cercando cmp imm ∈ [256,600] poi CALL; ritorna la CALL target. */
+/* Scansiona func cercando cmp imm in [256,600] poi CALL; ritorna la CALL target. */
+//se sta per attraversare una pagina non mappata, si ferma per evitare kernel panic.
 static unsigned long scan_for_x64_sys_call(unsigned long func)
 {
+    //ATTENZIONE scansione la memoria dentro la funzione entry_SYSCALL_64, che è relativamente piccola (qualche centinaio di byte), quindi 2048 byte sono più che sufficienti per trovare la CALL a do_syscall_64 senza rischiare di scansionare troppo lontano.
     unsigned char *p = (unsigned char *)func;
     int i, saw_cmp = 0;
 
@@ -200,6 +214,7 @@ static unsigned long scan_for_x64_sys_call(unsigned long func)
     return 0;
 }
 
+//------------------------------------------------------------------------------------------------------------------------
 /*
  * Percorso unico: LSTAR MSR → entry_SYSCALL_64 → scan do_syscall_64
  *
