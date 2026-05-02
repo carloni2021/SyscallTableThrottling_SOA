@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * throttle_core.c — Motore di throttling
  *
@@ -6,7 +5,7 @@
  *   chiamante tramite mm->exe_file.
  *
  * caller_is_registered / syscall_is_registered: verificano se il processo
- *   corrente e la syscall invocata sono nel set monitorato.
+ *   corrente e la syscall invocata sono nel set da monitorare.
  *
  * window_timer_fn: callback hrtimer 1 Hz che azzera call_count, aggiorna
  *   le statistiche sui thread bloccati e sveglia throttle_wq.
@@ -17,23 +16,29 @@
 
 #include "throttle.h"
 
-/* ================================================================
- *  STATISTICHE
- * ================================================================ */
-
-long long  peak_delay_ns                = 0;
-char       peak_delay_prog[TASK_COMM_LEN] = {0};
-uid_t      peak_delay_uid               = 0;
-atomic_t   current_blocked              = ATOMIC_INIT(0);
-long       peak_blocked                 = 0;
-long long  total_blocked_sum            = 0;
-long       total_blocked_count          = 0;
+//  STATISTICHE
+/* Per semplicità, tutte le statistiche sono aggiornate sotto un unico lock (stats_lock) per evitare complessità di sincronizzazione. 
+*  In un'implementazione più sofisticata, si potrebbero usare strutture dati separate e lock più granulari per ridurre la contesa.
+*/
+long long  peak_delay_ns                    = 0;
+char       peak_delay_prog[TASK_COMM_LEN]   = {0};
+uid_t      peak_delay_uid                   = 0;
+atomic_t   current_blocked                  = ATOMIC_INIT(0);
+long       peak_blocked                     = 0;
+long long  total_blocked_sum                = 0;
+long       total_blocked_count              = 0;
+//  LOCKS
 DEFINE_SPINLOCK(stats_lock);
 
-/* ================================================================
- *  HELPER — info sull'eseguibile chiamante
- * ================================================================ */
 
+//  HELPER 
+
+/* Risolve inode/device/nome dell'eseguibile del processo chiamante per identificazione e logging. Se mm o exe_file non sono disponibili, usa comm.
+*  Perchè mm->exe_file? Perché è più affidabile di comm: due processi con lo stesso nome (es. "bash") possono essere distinti se hanno eseguibili 
+*  diversi. Inoltre, comm può essere modificato da un processo, mentre exe_file riflette l'effettivo binario in esecuzione.
+*  Nota: questa funzione è chiamata ad ogni syscall monitorata, quindi è ottimizzata per il caso comune (mm->exe_file valido) e minimizza la durata 
+*  del lock mmap_read_lock.
+*/
 static void get_caller_exe_info(unsigned long *ino, dev_t *dev,
                                 char *name_buf, int buf_len)
 {
@@ -58,6 +63,7 @@ static void get_caller_exe_info(unsigned long *ino, dev_t *dev,
     mmap_read_unlock(mm);
 }
 
+//verifica se chiamante/syscall sono registrati
 static int caller_is_registered(unsigned long ino, dev_t dev, uid_t euid)
 {
     struct prog_node *pnode;
@@ -71,6 +77,8 @@ static int caller_is_registered(unsigned long ino, dev_t dev, uid_t euid)
     return 0;
 }
 
+// Ricerca della syscall
+//Da implementare : bitmap o hashtable
 static int syscall_is_registered(int nr)
 {
     struct syscall_node *snode;
@@ -83,8 +91,16 @@ static int syscall_is_registered(int nr)
  *  HRTIMER — finestra 1 Hz
  * ================================================================ */
 
+
+/*  Hrtimer supporta sia CLOCK_MONOTONIC che CLOCK_REALTIME, ma usiamo MONOTONIC per evitare problemi di salto temporale.
+*   La funzione window_timer_fn viene chiamata ogni secondo e azzera call_count, aggiorna le statistiche sui thread bloccati e sveglia throttle_wq per sbloccare
+*   eventuali thread in attesa.
+*/
 static enum hrtimer_restart window_timer_fn(struct hrtimer *timer)
 {
+    /*Nota che hrtimer è già in un contesto di interrupt, quindi non possiamo fare sleep o operazioni bloccanti. Per questo usiamo spin_lock_irqsave e wake_up_all.
+    inoltre hrimter è altamente preciso, quindi non c'è rischio di drift significativo nel timer.*/
+
     unsigned long flags;
     atomic_set(&call_count, 0);
     if (READ_ONCE(monitor_enabled)) {
@@ -97,6 +113,7 @@ static enum hrtimer_restart window_timer_fn(struct hrtimer *timer)
         }
         spin_unlock_irqrestore(&stats_lock, flags);
     }
+    // Una volta aggiornate le statistiche, svegliamo tutti i thread in attesa su throttle_wq. I thread risveglieranno e verificheranno se possono procedere o devono continuare ad aspettare.
     wake_up_all(&throttle_wq);
     hrtimer_forward_now(timer, ktime_set(1, 0));
     return HRTIMER_RESTART;
@@ -117,6 +134,7 @@ void throttle_core_start(struct hrtimer *timer)
  *  THROTTLE CHECK
  * ================================================================ */
 
+ // Punto di ingresso dal wrapper di hook; blocca il chiamante su throttle_wq se call_count supera max_calls, aggiorna peak_delay.
 void throttle_check(int nr)
 {
     char          comm[TASK_COMM_LEN];

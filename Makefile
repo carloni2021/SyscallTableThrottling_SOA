@@ -12,9 +12,7 @@ TEST2   := throttleTest2
 KDIR    ?= /lib/modules/$(shell uname -r)/build
 PWD     := $(shell pwd)
 
-# ----------------------------------------------------------------
 # Target principale
-# ----------------------------------------------------------------
 
 obj-m += $(MODULE).o
 $(MODULE)-objs := throttle_mem.o throttle_discovery.o throttle_hook.o \
@@ -36,10 +34,7 @@ $(TEST): $(TEST).c
 $(TEST2): $(TEST2).c
 	gcc -Wall -o $@ $< -lpthread
 
-# ----------------------------------------------------------------
-# Installazione / caricamento
-# ----------------------------------------------------------------
-
+# Per inserimento/rimozione modulo 
 load: module
 	sudo insmod $(MODULE).ko
 	sudo mknod /dev/$(MODULE) c $$(awk '$$2=="$(MODULE)" {print $$1}' /proc/devices) 0
@@ -57,10 +52,7 @@ unload:
 
 reload: unload load
 
-# ----------------------------------------------------------------
 # Pulizia
-# ----------------------------------------------------------------
-
 clean:
 	$(MAKE) -C $(KDIR) M=$(PWD) clean
 	rm -f $(CLIENT) $(TEST) $(TEST2)

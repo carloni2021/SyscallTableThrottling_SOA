@@ -1,6 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0
-/*
- * throttle_dev.c — Device a caratteri e handler IOCTL
+
+/* throttle_dev.c — Device a caratteri e handler IOCTL
  *
  * Espone /dev/throttleDriver come interfaccia di configurazione.
  * Tutti i comandi che modificano lo stato richiedono privilegi root (euid=0).
@@ -13,20 +12,33 @@
  *   SET/GET_MONITOR      — abilita/disabilita il throttling
  *   SET/GET_MAX          — imposta il limite di chiamate per finestra
  *   GET/RESET_STATS      — statistiche di ritardo e thread bloccati
- */
+*/
 
+// Include del core per accesso a strutture e funzioni condivise
 #include "throttle.h"
 
+//Major del device, assegnato dinamicamente rappresenta l'identificativo del driver per operazioni su /dev/throttleDriver 
 static int major;
-
+// Static perché è usato solo in questo file. Viene assegnato da register_chrdev e usato per creare l'interfaccia device.
 static int dev_open(struct inode *i, struct file *f)    { return 0; }
 static int dev_release(struct inode *i, struct file *f) { return 0; }
 
+/*verifica se il chiamante è root (euid=0) per autorizzazione operazioni di configurazione altrimenti 
+restituisce -EPERM per bloccare l'accesso non autorizzato a funzionalità critiche del modulo.*/
 static int caller_is_root(void)
 {
     return uid_eq(current_euid(), GLOBAL_ROOT_UID);
 }
 
+/* Handler IOCTL per tutte le operazioni di configurazione e query.
+ -verifica i privilegi del chiamante
+ -gestisce le liste di 
+    -programmi
+    -UID
+    -syscall
+ -abilita/disabilita il monitoraggio
+ -imposta il limite di chiamate 
+ -restituisce statistiche.*/
 static long ioctl_handler(struct file *filep,
                           unsigned int cmd, unsigned long arg)
 {
