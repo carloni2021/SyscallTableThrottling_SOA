@@ -12,9 +12,10 @@
 
 #include "throttle.h"
 
-/* ================================================================
- *  VTPMO — Page-table walk via CR3
- * ================================================================ */
+/* 
+ *  VTPMO — Page-table walk via CR3 scanning della memoria virtuale
+ *  per identificare sys_call_table senza simboli esportati.
+ */
 
 // Maschera per estrarre l'indirizzo fisico da un entry di pagina
 #define PT_ADDR_MASK 0x7ffffffffffff000ULL
@@ -61,9 +62,9 @@ int sys_vtpmo(unsigned long vaddr)
     return (int)((e & PT_ADDR_MASK) >> 12);
 }
 
-/* ================================================================
+/* 
  *  CR0.WP — disabilita write-protect bypassando il CR pinning
- * ================================================================ */
+ */
 
 static unsigned long saved_cr0;
 static unsigned long saved_cr4;
@@ -80,7 +81,10 @@ inline void write_cr0_forced(unsigned long val)
     unsigned long __force_order;
     asm volatile("mov %0, %%cr0" : "+r"(val), "+m"(__force_order));
 }
-
+/*differenza tra cr4 e cr0 : 
+* cr0 è un registro di controllo che gestisce le operazioni di base del processore, come la protezione della memoria, il paging e le interruzioni.
+* cr4 è un registro di controllo che gestisce funzionalità avanzate del processore (gestisce anche la protezione per ROP)
+*/
 static inline void write_cr4_forced(unsigned long val)
 {
     unsigned long __force_order;

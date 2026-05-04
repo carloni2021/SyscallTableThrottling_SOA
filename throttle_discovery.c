@@ -214,17 +214,15 @@ static unsigned long scan_for_x64_sys_call(unsigned long func)
     return 0;
 }
 
-//------------------------------------------------------------------------------------------------------------------------
+
 /*
  * Percorso unico: LSTAR MSR → entry_SYSCALL_64 → scan do_syscall_64
- *
- * Il percorso via kprobe (find_x64_sys_call_kprobe) è stato rimosso.
- * Motivo: kprobes_module_going() scansiona la memoria del modulo durante
- * delete_module e si può bloccare sulla struct kprobe statica anche dopo
- * unregister_kprobe, causando un freeze durante rmmod.
+ * Questa funzione legge l'indirizzo di entry_SYSCALL_64 da LSTAR, verifica che sia valido, poi scansiona i primi 2048 byte alla ricerca di un CMP con un numero di syscall (imm tra 256 e 600) seguito da una CALL, che dovrebbe essere do_syscall_64. Se trova la CALL, restituisce il suo target; altrimenti restituisce 0. 
+ * Se non trova la CALL in entry_SYSCALL_64, prova anche altre CALL vicine (fino a 8) che potrebbero essere do_syscall_64, ma in pratica su kernel recenti dovrebbe sempre trovarla in entry_SYSCALL_64. Se non trova nulla, restituisce -ENOENT.
  */
 static int find_x64_sys_call_lstar(void)
 {
+    //LSTAR in MSR contiene l'indirizzo di entry_SYSCALL_64 che gestisce le syscall in modalità 64-bit.
     unsigned long lstar;
     unsigned char *p;
     int i;
@@ -232,6 +230,7 @@ static int find_x64_sys_call_lstar(void)
     int ncand = 0;
 
     rdmsrl(MSR_LSTAR, lstar);
+    //non valido perchè entry_SYSCALL_64 è sempre mappato in alto
     if (lstar < 0xffffffff00000000ULL) {
         printk(KERN_ERR "<throttle>: LSTAR non valido: %lx\n", lstar);
         return -ENOENT;
@@ -251,11 +250,16 @@ static int find_x64_sys_call_lstar(void)
         if ((p[i] == 0x0F && p[i+1] == 0x07) || p[i] == 0xCF) break;
     }
 
+    //non ci sono candidati 
     if (ncand == 0) {
         printk(KERN_ERR "<throttle>: nessuna CALL trovata in entry_SYSCALL_64\n");
         return -ENOENT;
     }
 
+    //prova a scansionare ciascun candidato trovato in entry_SYSCALL_64, alla ricerca di do_syscall_64 tramite scan_for_x64_sys_call.
+    /*
+     * Questo approccio è orientato a coprire versioni più vecchie del kernel
+     */
     for (i = 0; i < ncand; i++) {
         unsigned long x64;
         printk(KERN_INFO "<throttle>: provo do_syscall_64 @ %px\n", (void *)cands[i]);
@@ -272,6 +276,8 @@ static int find_x64_sys_call_lstar(void)
     return -ENOENT;
 }
 
+//Questa funzione è l'entry point per trovare x64_sys_call, attualmente implementato solo tramite il percorso LSTAR → entry_SYSCALL_64 → scan do_syscall_64. 
+// Se in futuro si volesse aggiungere un percorso alternativo (es. via kprobe su entry_SYSCALL_64), basterebbe modificarla per provare prima quel percorso e poi eventualmente LSTAR.
 int find_x64_sys_call(void)
 {
     return find_x64_sys_call_lstar();

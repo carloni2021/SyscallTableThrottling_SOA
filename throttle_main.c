@@ -84,6 +84,8 @@ static void __exit throttle_exit(void)
     struct syscall_node *scursor, *stmp;
     unsigned long flags;
 
+//Sequenza di unloading monitorata, con messaggi di log per ogni step. Inizialmente necessari per debug ma mantenuti poichè reputati utili 
+
     printk(KERN_INFO "<throttle>: exit [1] inizio\n");
 
     /* [2] Segnala l'unloading: throttle_check uscirà dai suoi loop di attesa */
@@ -109,6 +111,9 @@ static void __exit throttle_exit(void)
     /* [6] Quiescence 2: barriera finale su tutti i CPU */
     synchronize_rcu();
 
+//Solo per i kernel >= 5.15 perchè solo lì viene patchato x64_sys_call, ma in futuro se si dovesse patchare anche su kernel più vecchi, questa funzione dovrebbe essere chiamata comunque per ripristinare la funzione originale e liberare lo stub.
+//Ripristina x64_sys_call e libera lo stub esterno. Deve essere fatto DOPO synchronize_rcu() + drain
+//in modo che nessun CPU possa essere ancora in esecuzione nello stub.
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
     /* [7] Ripristina x64_sys_call e libera lo stub esterno. */
     restore_x64_sys_call();
