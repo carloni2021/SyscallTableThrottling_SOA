@@ -130,6 +130,16 @@ void throttle_core_start(struct hrtimer *timer)
     hrtimer_start(timer, ktime_set(1, 0), HRTIMER_MODE_REL);
 }
 
+/* Resetta la finestra di throttling: azzera il contatore e riparte il timer
+ * da zero. Chiamato all'abilitazione del monitor per allineare la finestra
+ * del driver con l'inizio effettivo della sessione di throttling. */
+void throttle_window_reset(struct hrtimer *timer)
+{
+    atomic_set(&call_count, 0);
+    hrtimer_cancel(timer);
+    hrtimer_start(timer, ktime_set(1, 0), HRTIMER_MODE_REL);
+}
+
 /* ================================================================
  *  THROTTLE CHECK
  * ================================================================ */

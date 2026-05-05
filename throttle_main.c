@@ -36,7 +36,7 @@ DECLARE_WAIT_QUEUE_HEAD(throttle_wq);
 atomic_t          active_threads_in_wrapper = ATOMIC_INIT(0);
 DECLARE_WAIT_QUEUE_HEAD(unload_wq);
 
-static struct hrtimer window_timer;
+struct hrtimer window_timer;
 
 /* ================================================================
  *  INIT / EXIT

@@ -214,7 +214,14 @@ static long ioctl_handler(struct file *filep,
         spin_lock_irqsave(&config_lock, flags);
         monitor_enabled = (nr_val != 0) ? 1 : 0;
         spin_unlock_irqrestore(&config_lock, flags);
-        if (!monitor_enabled) wake_up_all(&throttle_wq);
+        if (monitor_enabled) {
+            /* Resetta il timer alla prima abilitazione: allinea la finestra
+             * del driver con l'inizio del test, evitando l'anomalia da
+             * disallineamento (fino a 2x MAX osservabili nel primo secondo). */
+            throttle_window_reset(&window_timer);
+        } else {
+            wake_up_all(&throttle_wq);
+        }
         printk(KERN_INFO "<throttle>: monitor %s\n", monitor_enabled ? "ON" : "OFF");
         break;
 

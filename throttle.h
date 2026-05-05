@@ -161,6 +161,7 @@ extern spinlock_t stats_lock;
 /* Drain protocol: usati da throttle_hook.c e throttle_main.c */
 extern atomic_t          active_threads_in_wrapper;
 extern wait_queue_head_t unload_wq;
+extern struct hrtimer    window_timer;
 
 /* ================================================================
  *  SYS_CALL_TABLE — definita in throttle_discovery.c
@@ -202,6 +203,7 @@ void remove_all_hooks(void);
 
 void throttle_check(int nr);
 void throttle_core_start(struct hrtimer *timer);
+void throttle_window_reset(struct hrtimer *timer);
 
 /* ================================================================
  *  PROTOTIPI — throttle_dev.c
