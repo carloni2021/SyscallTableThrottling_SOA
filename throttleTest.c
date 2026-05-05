@@ -188,9 +188,17 @@ int main(int argc, char *argv[])
         pthread_create(&threads[i], NULL, worker, &args[i]);
     }
 
+    /* ---- Warmup: attende la fine della finestra corrente del driver ----
+     * L'hrtimer del driver parte al carico del modulo e non è sincronizzato
+     * con l'inizio del test.  Senza warmup la prima finestra di misura può
+     * coprire due finestre del driver (fino a 2×MAX completamenti).
+     * Un secondo di attesa garantisce che la prima misurazione parta sempre
+     * all'inizio di una finestra fresca. */
+    sleep(1);
+
     /* ---- Misura il throughput ogni secondo ---- */
     long *per_sec = malloc(duration * sizeof(long));
-    long  prev    = 0;
+    long  prev    = atomic_load(&total_calls);   /* baseline post-warmup */
 
     printf("  sec  calls/s  stato\n");
     printf("  ---  -------  -----\n");

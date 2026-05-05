@@ -166,6 +166,10 @@ static int test_blocking(int drv_fd, const char *progpath,
     for (int i = 0; i < nworkers; i++)
         pthread_create(&th[i], NULL, t1_worker, NULL);
 
+    /* Warmup: lascia scadere la finestra parziale del driver (vedi throttleTest.c) */
+    sleep(1);
+    prev = atomic_load(&t1_calls);
+
     /* ---- Misurazione throughput ---- */
     printf("  sec  calls/s  stato\n");
     printf("  ---  -------  -----\n");
@@ -356,8 +360,12 @@ static int test_uid(int drv_fd, int nworkers, int duration, int max_val)
         pids[n_throttled + i] = p;
     }
 
+    /* Warmup: lascia scadere la finestra parziale del driver */
+    sleep(1);
+
     /* ---- Misurazione throughput ---- */
-    long prev_thr = 0, prev_ctl = 0;
+    long prev_thr = atomic_load(&sh->throttled_calls);
+    long prev_ctl = atomic_load(&sh->control_calls);
     long *ps_thr  = malloc(duration * sizeof(long));
     long *ps_ctl  = malloc(duration * sizeof(long));
 
@@ -607,6 +615,8 @@ static int test_monitor_toggle(int drv_fd, const char *progpath,
     printf("  sec  calls/s  stato\n");
     printf("  ---  -------  -----\n");
 
+    /* Warmup: lascia scadere la finestra parziale del driver */
+    sleep(1);
     long prev = atomic_load(&t4_calls);
     long ps_a[PHASE_SEC];
     for (int s = 0; s < PHASE_SEC; s++) {

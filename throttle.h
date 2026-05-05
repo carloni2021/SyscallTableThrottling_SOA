@@ -203,7 +203,6 @@ void remove_all_hooks(void);
 
 void throttle_check(int nr);
 void throttle_core_start(struct hrtimer *timer);
-void throttle_window_reset(struct hrtimer *timer);
 
 /* ================================================================
  *  PROTOTIPI — throttle_dev.c
