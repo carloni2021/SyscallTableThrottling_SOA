@@ -36,6 +36,7 @@
 #define SCT_START  0xffffffff00000000ULL
 #define SCT_MAX    0xfffffffffff00000ULL
 //Questi indici sono stati identificati empiricamente su diverse versioni del kernel e sono generalmente stabili, ma potrebbero variare in future versioni del kernel.
+#define NI_1  134
 #define NI_2  174
 #define NI_3  182
 #define NI_4  183

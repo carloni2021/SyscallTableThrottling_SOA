@@ -170,6 +170,14 @@ static long ioctl_handler(struct file *filep,
         if (copy_from_user(&nr_val, (int __user *)arg, sizeof(nr_val)))
             return -EFAULT;
         if (nr_val < 0 || nr_val >= NR_syscalls) return -EINVAL;
+        spin_lock_irqsave(&config_lock, flags);
+        list_for_each_entry(scursor, &syscall_list, list) {
+            if (scursor->nr == nr_val) {
+                spin_unlock_irqrestore(&config_lock, flags);
+                return 0;
+            }
+        }
+        spin_unlock_irqrestore(&config_lock, flags);
         snode = kmalloc(sizeof(*snode), GFP_KERNEL);
         if (!snode) return -ENOMEM;
         snode->nr = nr_val;
