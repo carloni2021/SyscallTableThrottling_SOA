@@ -64,10 +64,14 @@ static asmlinkage long generic_sct_wrapper(const struct pt_regs *regs)
 
     throttle_check(nr);
 
+    /* Il drain segnala completamento DOPO orig_fn: il decremento deve avvenire
+     * dopo la chiamata per evitare che throttle_exit liberi la memoria del modulo
+     * mentre siamo ancora dentro generic_sct_wrapper (use-after-free). */
+    ret = orig_fn(regs);
     if (atomic_dec_and_test(&active_threads_in_wrapper) &&
         smp_load_acquire(&module_unloading))
         wake_up(&unload_wq);
-    return orig_fn(regs);
+    return ret;
 }
 
 // Installa un hook sulla syscall nr: sostituisce sys_call_table[nr] con generic_sct_wrapper e salva l'handler originale in hooks[]. Ritorna 0 se successo, -ENODEV se sys_call_table non trovata, -ENOMEM se non ci sono slot liberi per nuovi hook.

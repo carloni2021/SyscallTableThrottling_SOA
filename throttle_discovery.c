@@ -186,8 +186,12 @@ static unsigned long scan_for_x64_sys_call(unsigned long func)
     int i, saw_cmp = 0;
 
     for (i = 0; i < 2048; i++) {
-        if (!((unsigned long)(p + i) & (PAGE_SIZE - 1)) &&
-            sys_vtpmo((unsigned long)(p + i)) == NO_MAP)
+        /* Verifica page boundary con lookahead di 6 byte (massimo accesso: p+i+5).
+         * Il check originale (solo a boundary esatti di p+i) non proteggeva dagli
+         * accessi multi-byte vicino alla fine di una pagina → kernel panic.
+         * sys_vtpmo è chiamata solo quando p+i e p+i+6 sono su pagine diverse. */
+        if ((((unsigned long)(p + i) ^ (unsigned long)(p + i + 6)) & ~(PAGE_SIZE - 1)) &&
+            sys_vtpmo((unsigned long)(p + i + 6)) == NO_MAP)
             break;
 
         /* cmp r/m32, imm32: 81 /7 */

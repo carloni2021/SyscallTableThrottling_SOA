@@ -171,10 +171,13 @@ void throttle_check(int nr)
     {
         int ret;
         while (1) {
+            /* READ_ONCE: necessario perché module_unloading è scritto con
+             * smp_store_release; senza READ_ONCE il compilatore potrebbe
+             * cachare il valore in un registro e non vedere mai l'aggiornamento. */
             ret = wait_event_interruptible(throttle_wq,
                       atomic_read(&call_count) < max_calls ||
-                      !monitor_enabled || module_unloading);
-            if (ret != 0 || !monitor_enabled || module_unloading) break;
+                      !monitor_enabled || READ_ONCE(module_unloading));
+            if (ret != 0 || !monitor_enabled || READ_ONCE(module_unloading)) break;
             count = atomic_inc_return(&call_count);
             if (count <= max_calls) break;
             atomic_dec(&call_count);
