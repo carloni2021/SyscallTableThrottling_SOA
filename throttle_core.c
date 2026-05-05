@@ -159,30 +159,31 @@ void throttle_check(int nr)
     if (!registered) return;
 
     count = atomic_inc_return(&call_count);
-    if (count <= max_calls) return;
+    if (count <= READ_ONCE(max_calls)) return;
 
     atomic_dec(&call_count);
     enter_time = ktime_get();
     atomic_inc(&current_blocked);
 
     printk(KERN_DEBUG "<throttle>: BLOCKED prog='%s' euid=%u nr=%d max=%d\n",
-           comm, euid, nr, max_calls);
+           comm, euid, nr, READ_ONCE(max_calls));
 
     {
         int ret;
         while (1) {
-            /* READ_ONCE: necessario perché module_unloading è scritto con
-             * smp_store_release; senza READ_ONCE il compilatore potrebbe
-             * cachare il valore in un registro e non vedere mai l'aggiornamento. */
+            /* READ_ONCE: necessario perché module_unloading e monitor_enabled sono
+             * scritti con smp_store_release; senza READ_ONCE il compilatore potrebbe
+             * cachare il valore in un registro e non vedere mai l'aggiornamento.
+             * Stesso principio per max_calls: può cambiare via IOCTL_SET_MAX. */
             /* _exclusive: registra il thread come waiter esclusivo, così
              * wake_up_nr(max_calls) sveglia esattamente max_calls thread
              * invece di tutti (thundering herd). */
             ret = wait_event_interruptible_exclusive(throttle_wq,
-                      atomic_read(&call_count) < max_calls ||
-                      !monitor_enabled || READ_ONCE(module_unloading));
-            if (ret != 0 || !monitor_enabled || READ_ONCE(module_unloading)) break;
+                      atomic_read(&call_count) < READ_ONCE(max_calls) ||
+                      !READ_ONCE(monitor_enabled) || READ_ONCE(module_unloading));
+            if (ret != 0 || !READ_ONCE(monitor_enabled) || READ_ONCE(module_unloading)) break;
             count = atomic_inc_return(&call_count);
-            if (count <= max_calls) break;
+            if (count <= READ_ONCE(max_calls)) break;
             atomic_dec(&call_count);
         }
     }

@@ -168,7 +168,8 @@ static int test_blocking(int drv_fd, const char *progpath,
 
     /* Warmup: lascia scadere la finestra parziale del driver (vedi throttleTest.c) */
     sleep(1);
-    prev = atomic_load(&t1_calls);
+    long t1_baseline = atomic_load(&t1_calls);
+    prev = t1_baseline;
 
     /* ---- Misurazione throughput ---- */
     printf("  sec  calls/s  stato\n");
@@ -189,7 +190,7 @@ static int test_blocking(int drv_fd, const char *progpath,
     for (int i = 0; i < nworkers; i++)
         pthread_join(th[i], NULL);
     free(th);
-    long total = atomic_load(&t1_calls);
+    long total = atomic_load(&t1_calls) - t1_baseline;  /* esclude il warmup */
 
     /* ---- Statistiche driver ---- */
     struct throttle_stats st = {0};
@@ -364,8 +365,10 @@ static int test_uid(int drv_fd, int nworkers, int duration, int max_val)
     sleep(1);
 
     /* ---- Misurazione throughput ---- */
-    long prev_thr = atomic_load(&sh->throttled_calls);
-    long prev_ctl = atomic_load(&sh->control_calls);
+    long base_thr = atomic_load(&sh->throttled_calls);  /* baseline post-warmup */
+    long base_ctl = atomic_load(&sh->control_calls);
+    long prev_thr = base_thr;
+    long prev_ctl = base_ctl;
     long *ps_thr  = malloc(duration * sizeof(long));
     long *ps_ctl  = malloc(duration * sizeof(long));
 
@@ -398,8 +401,9 @@ static int test_uid(int drv_fd, int nworkers, int duration, int max_val)
         if (pids[i] > 0) waitpid(pids[i], NULL, 0);
     free(pids);
 
-    long total_thr = atomic_load(&sh->throttled_calls);
-    long total_ctl = atomic_load(&sh->control_calls);
+    /* esclude il warmup dai totali */
+    long total_thr = atomic_load(&sh->throttled_calls) - base_thr;
+    long total_ctl = atomic_load(&sh->control_calls)   - base_ctl;
 
     /* ---- Statistiche driver ---- */
     struct throttle_stats st = {0};
@@ -508,7 +512,7 @@ static int test_root_access(int drv_fd)
          *    Anche il reset delle statistiche è un'operazione di modifica
          *    e deve essere riservato a root.
          */
-        r = ioctl(drv_fd, IOCTL_RESET_STATS);
+        r = ioctl(drv_fd, IOCTL_RESET_STATS, 0);
         if (r == -1 && errno == EPERM) {
             printf("  [OK] RESET_STATS da uid=%u → EPERM\n", TARGET_UID);
         } else {

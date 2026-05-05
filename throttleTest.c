@@ -198,7 +198,8 @@ int main(int argc, char *argv[])
 
     /* ---- Misura il throughput ogni secondo ---- */
     long *per_sec = malloc(duration * sizeof(long));
-    long  prev    = atomic_load(&total_calls);   /* baseline post-warmup */
+    long  baseline = atomic_load(&total_calls);  /* baseline post-warmup */
+    long  prev     = baseline;
 
     printf("  sec  calls/s  stato\n");
     printf("  ---  -------  -----\n");
@@ -210,13 +211,8 @@ int main(int argc, char *argv[])
         per_sec[sec] = rate;
         prev = cur;
 
-        /*
-         * Tolleranza del 50% sul MAX misurato per finestra:
-         * la finestra del driver (hrtimer) e quella del test (sleep)
-         * non sono sincronizzate — al boundary si possono osservare
-         * fino a ~2x MAX calls in un singolo intervallo di misura.
-         * Usiamo 1.5x come soglia per segnalare anomalie evidenti.
-         */
+        /* Tolleranza del 50%: copre il jitter di scheduling tra il boundary
+         * dell'hrtimer e quello dello sleep del test (~ms). */
         const char *stato = (rate > (long)(max_val * 1.5)) ? "ANOMALIA" : "ok";
         printf("  %3d  %7ld  %s\n", sec + 1, rate, stato);
     }
@@ -227,7 +223,7 @@ int main(int argc, char *argv[])
     for (int i = 0; i < num_threads; i++)
         pthread_join(threads[i], NULL);
 
-    long total = atomic_load(&total_calls);
+    long total = atomic_load(&total_calls) - baseline;  /* esclude il warmup */
 
     /* ---- Statistiche dal driver ---- */
     struct throttle_stats stats;
