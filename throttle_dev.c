@@ -42,9 +42,9 @@ static int caller_is_root(void)
 static long ioctl_handler(struct file *filep,
                           unsigned int cmd, unsigned long arg)
 {
-    struct prog_node    *pnode, *pcursor, *ptmp;
-    struct uid_node     *unode, *ucursor, *utmp;
-    struct syscall_node *snode, *scursor, *stmp;
+    struct prog_node  *pnode, *pcursor;
+    struct uid_node   *unode, *ucursor;
+    struct hlist_node *htmp;
     struct throttle_stats        stats_out;
     struct throttle_prog_list   *plist = NULL;
     struct throttle_uid_list     ulist;
@@ -82,14 +82,14 @@ static long ioctl_handler(struct file *filep,
         strscpy(pnode->fpath, prog_path, PROG_PATH_MAX);
         path_put(&kpath);
         spin_lock_irqsave(&config_lock, flags);
-        list_for_each_entry(pcursor, &prog_list, list) {
+        hash_for_each_possible(prog_table, pcursor, hnode, pnode->inode) {
             if (pcursor->inode == pnode->inode && pcursor->device == pnode->device) {
                 spin_unlock_irqrestore(&config_lock, flags);
                 kfree(pnode);
                 return 0;
             }
         }
-        list_add(&pnode->list, &prog_list);
+        hash_add(prog_table, &pnode->hnode, pnode->inode);
         spin_unlock_irqrestore(&config_lock, flags);
         printk(KERN_INFO "<throttle>: [PROG+] '%s'\n", pnode->fpath);
         break;
@@ -106,19 +106,20 @@ static long ioctl_handler(struct file *filep,
         del_dev = kpath.dentry->d_inode->i_sb->s_dev;
         path_put(&kpath);
         spin_lock_irqsave(&config_lock, flags);
-        list_for_each_entry_safe(pcursor, ptmp, &prog_list, list)
+        hash_for_each_possible_safe(prog_table, pcursor, htmp, hnode, del_ino)
             if (pcursor->inode == del_ino && pcursor->device == del_dev) {
-                list_del(&pcursor->list); kfree(pcursor);
+                hash_del(&pcursor->hnode); kfree(pcursor);
             }
         spin_unlock_irqrestore(&config_lock, flags);
         break;
     }
 
-    case IOCTL_LIST_PROGS:
+    case IOCTL_LIST_PROGS: {
+        int bkt;
         plist = kzalloc(sizeof(*plist), GFP_KERNEL);
         if (!plist) return -ENOMEM;
         spin_lock_irqsave(&config_lock, flags);
-        list_for_each_entry(pcursor, &prog_list, list) {
+        hash_for_each(prog_table, bkt, pcursor, hnode) {
             if (plist->count < MAX_REG_PROGS)
                 strscpy(plist->paths[plist->count++], pcursor->fpath, PROG_PATH_MAX);
         }
@@ -128,6 +129,7 @@ static long ioctl_handler(struct file *filep,
         }
         kfree(plist);
         break;
+    }
 
     case IOCTL_ADD_UID:
         if (copy_from_user(&uid_val, (unsigned int __user *)arg, sizeof(uid_val)))
@@ -136,13 +138,13 @@ static long ioctl_handler(struct file *filep,
         if (!unode) return -ENOMEM;
         unode->uid = (uid_t)uid_val;
         spin_lock_irqsave(&config_lock, flags);
-        list_for_each_entry(ucursor, &uid_list, list) {
+        hash_for_each_possible(uid_table, ucursor, hnode, uid_val) {
             if (ucursor->uid == (uid_t)uid_val) {
                 spin_unlock_irqrestore(&config_lock, flags);
                 kfree(unode); return 0;
             }
         }
-        list_add(&unode->list, &uid_list);
+        hash_add(uid_table, &unode->hnode, unode->uid);
         spin_unlock_irqrestore(&config_lock, flags);
         printk(KERN_INFO "<throttle>: [UID+] %u\n", uid_val);
         break;
@@ -151,65 +153,60 @@ static long ioctl_handler(struct file *filep,
         if (copy_from_user(&uid_val, (unsigned int __user *)arg, sizeof(uid_val)))
             return -EFAULT;
         spin_lock_irqsave(&config_lock, flags);
-        list_for_each_entry_safe(ucursor, utmp, &uid_list, list)
-            if (ucursor->uid == (uid_t)uid_val) { list_del(&ucursor->list); kfree(ucursor); }
+        hash_for_each_possible_safe(uid_table, ucursor, htmp, hnode, uid_val)
+            if (ucursor->uid == (uid_t)uid_val) { hash_del(&ucursor->hnode); kfree(ucursor); }
         spin_unlock_irqrestore(&config_lock, flags);
         break;
 
-    case IOCTL_LIST_UIDS:
+    case IOCTL_LIST_UIDS: {
+        int bkt;
         memset(&ulist, 0, sizeof(ulist));
         spin_lock_irqsave(&config_lock, flags);
-        list_for_each_entry(ucursor, &uid_list, list)
+        hash_for_each(uid_table, bkt, ucursor, hnode)
             if (ulist.count < MAX_REG_UIDS) ulist.uids[ulist.count++] = ucursor->uid;
         spin_unlock_irqrestore(&config_lock, flags);
         if (copy_to_user((struct throttle_uid_list __user *)arg, &ulist, sizeof(ulist)))
             return -EFAULT;
         break;
+    }
 
-    case IOCTL_ADD_SYSCALL:
+    case IOCTL_ADD_SYSCALL: {
+        /* Bitmap: test_bit O(1); nessuna allocazione, nessuna lista */
+        int hret;
         if (copy_from_user(&nr_val, (int __user *)arg, sizeof(nr_val)))
             return -EFAULT;
         if (nr_val < 0 || nr_val >= NR_syscalls) return -EINVAL;
+        if (test_bit(nr_val, syscall_bitmap)) return 0;     /* già presente */
+        hret = install_hook(nr_val);
+        if (hret) return hret;
         spin_lock_irqsave(&config_lock, flags);
-        list_for_each_entry(scursor, &syscall_list, list) {
-            if (scursor->nr == nr_val) {
-                spin_unlock_irqrestore(&config_lock, flags);
-                return 0;
-            }
-        }
-        spin_unlock_irqrestore(&config_lock, flags);
-        snode = kmalloc(sizeof(*snode), GFP_KERNEL);
-        if (!snode) return -ENOMEM;
-        snode->nr = nr_val;
-        {
-            int hret = install_hook(nr_val);
-            if (hret) { kfree(snode); return hret; }
-        }
-        spin_lock_irqsave(&config_lock, flags);
-        list_add(&snode->list, &syscall_list);
+        set_bit(nr_val, syscall_bitmap);
         spin_unlock_irqrestore(&config_lock, flags);
         printk(KERN_INFO "<throttle>: [SYS+] nr=%d\n", nr_val);
         break;
+    }
 
     case IOCTL_DEL_SYSCALL:
         if (copy_from_user(&nr_val, (int __user *)arg, sizeof(nr_val)))
             return -EFAULT;
-        remove_hook(nr_val);
+        if (!test_bit(nr_val, syscall_bitmap)) break;       /* non presente */
         spin_lock_irqsave(&config_lock, flags);
-        list_for_each_entry_safe(scursor, stmp, &syscall_list, list)
-            if (scursor->nr == nr_val) { list_del(&scursor->list); kfree(scursor); }
+        clear_bit(nr_val, syscall_bitmap);
         spin_unlock_irqrestore(&config_lock, flags);
+        remove_hook(nr_val);
         break;
 
-    case IOCTL_LIST_SYSCALLS:
+    case IOCTL_LIST_SYSCALLS: {
+        int bit;
         memset(&slist, 0, sizeof(slist));
         spin_lock_irqsave(&config_lock, flags);
-        list_for_each_entry(scursor, &syscall_list, list)
-            if (slist.count < MAX_HOOKED_SYSCALLS) slist.nrs[slist.count++] = scursor->nr;
+        for_each_set_bit(bit, syscall_bitmap, NR_syscalls)
+            if (slist.count < MAX_HOOKED_SYSCALLS) slist.nrs[slist.count++] = bit;
         spin_unlock_irqrestore(&config_lock, flags);
         if (copy_to_user((struct throttle_syscall_list __user *)arg, &slist, sizeof(slist)))
             return -EFAULT;
         break;
+    }
 
     case IOCTL_SET_MONITOR:
         if (copy_from_user(&nr_val, (int __user *)arg, sizeof(nr_val)))
@@ -245,7 +242,8 @@ static long ioctl_handler(struct file *filep,
         memset(peak_delay_prog, 0, TASK_COMM_LEN);
         peak_blocked = 0; total_blocked_sum = 0; total_blocked_count = 0;
         spin_unlock_irqrestore(&stats_lock, flags);
-        wake_up_all(&throttle_wq);
+        /* Sveglia al più nr_val thread: coerente con i nuovi slot disponibili */
+        wake_up_nr(&throttle_wq, nr_val);
         printk(KERN_INFO "<throttle>: MAX=%d\n", nr_val);
         break;
 

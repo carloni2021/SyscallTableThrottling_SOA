@@ -9,6 +9,8 @@
 #include <linux/uaccess.h>
 #include <linux/slab.h>
 #include <linux/list.h>
+#include <linux/hashtable.h>
+#include <linux/bitmap.h>
 #include <linux/string.h>
 #include <linux/sched.h>
 #include <linux/cred.h>
@@ -103,22 +105,26 @@ struct throttle_syscall_list {
 
 /* ================================================================
  *  STRUTTURE DATI INTERNE
+ *
+ *  Syscall  → bitmap   (NR_syscalls bit, test_bit O(1))
+ *  UID      → hashtable 2^UID_HASH_BITS  bucket, chiave = uid
+ *  Programmi→ hashtable 2^PROG_HASH_BITS bucket, chiave = inode
  * ================================================================ */
 
+#define UID_HASH_BITS  8    /* 256 bucket */
+#define PROG_HASH_BITS 8    /* 256 bucket */
+
 struct prog_node {
-    unsigned long    inode;
-    dev_t            device;
-    char             fpath[PROG_PATH_MAX];
-    struct list_head list;
+    unsigned long     inode;
+    dev_t             device;
+    char              fpath[PROG_PATH_MAX];
+    struct hlist_node hnode;    /* nodo hashtable, bucket selezionato da inode */
 };
 struct uid_node {
-    uid_t uid;
-    struct list_head list;
+    uid_t             uid;
+    struct hlist_node hnode;    /* nodo hashtable, bucket selezionato da uid */
 };
-struct syscall_node {
-    int nr;
-    struct list_head list;
-};
+/* syscall_node rimossa: il set di syscall è tracciato da syscall_bitmap */
 
 typedef asmlinkage long (*syscall_fn_t)(const struct pt_regs *);
 
@@ -126,9 +132,10 @@ typedef asmlinkage long (*syscall_fn_t)(const struct pt_regs *);
  *  STATO GLOBALE — definito in throttle_main.c
  * ================================================================ */
 
-extern struct list_head  prog_list;
-extern struct list_head  uid_list;
-extern struct list_head  syscall_list;
+/* Hashtable programmi/UID (2^BITS bucket) e bitmap syscall (NR_syscalls bit) */
+extern struct hlist_head prog_table[1 << PROG_HASH_BITS];
+extern struct hlist_head uid_table[1 << UID_HASH_BITS];
+extern unsigned long     syscall_bitmap[BITS_TO_LONGS(NR_syscalls)];
 
 extern int               monitor_enabled;
 extern int               max_calls;

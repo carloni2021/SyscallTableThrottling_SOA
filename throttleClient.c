@@ -27,7 +27,7 @@
 #define PROG_PATH_MAX    256
 #define MAX_REG_PROGS    32
 #define MAX_REG_UIDS     32
-#define MAX_REG_SYSCALLS 32
+#define MAX_HOOKED_SYSCALLS 32
 #define DEVICE_PATH      "/dev/throttleDriver"
 
 /* Devono coincidere con throttleDriver.c */
@@ -52,7 +52,7 @@ struct throttle_uid_list {
 
 struct throttle_syscall_list {
     int count;
-    int nrs[MAX_REG_SYSCALLS];
+    int nrs[MAX_HOOKED_SYSCALLS];
 };
 
 #define IOCTL_ADD_PROG      _IOW('T',  1, char[PROG_PATH_MAX])
@@ -170,7 +170,7 @@ int main(int argc, char *argv[])
         }
 
     } else if (strcmp(cmd, "reset_stats") == 0) {
-        ret = ioctl(fd, IOCTL_RESET_STATS);
+        ret = ioctl(fd, IOCTL_RESET_STATS, 0);
         if (ret == 0)
             printf("Statistiche azzerate.\n");
 

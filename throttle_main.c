@@ -16,10 +16,10 @@
  *  STATO GLOBALE CONDIVISO
  * ================================================================ */
 
- //Macro definizione delle teste di lista
-LIST_HEAD(prog_list);
-LIST_HEAD(uid_list);
-LIST_HEAD(syscall_list);
+ /* Hashtable per programmi e UID (lookup O(1)), bitmap per syscall (test_bit O(1)) */
+DEFINE_HASHTABLE(prog_table, PROG_HASH_BITS);
+DEFINE_HASHTABLE(uid_table,  UID_HASH_BITS);
+DECLARE_BITMAP(syscall_bitmap, NR_syscalls);    /* zero-init in BSS */
 
 int  monitor_enabled  = 0;
 int  max_calls        = DEFAULT_MAX;
@@ -79,10 +79,11 @@ static int __init throttle_init(void)
 //Funzione di cleanup del modulo: rimuove hook, drena i thread in-flight, cancella timer, pulisce liste
 static void __exit throttle_exit(void)
 {
-    struct prog_node    *pcursor, *ptmp;
-    struct uid_node     *ucursor, *utmp;
-    struct syscall_node *scursor, *stmp;
-    unsigned long flags;
+    struct prog_node  *pcursor;
+    struct uid_node   *ucursor;
+    struct hlist_node *htmp;
+    unsigned long      flags;
+    int                bkt;
 
 //Sequenza di unloading monitorata, con messaggi di log per ogni step. Inizialmente necessari per debug ma mantenuti poichè reputati utili 
 
@@ -124,12 +125,11 @@ static void __exit throttle_exit(void)
     printk(KERN_INFO "<throttle>: exit [8] timer cancellato\n");
 
     spin_lock_irqsave(&config_lock, flags);
-    list_for_each_entry_safe(pcursor, ptmp, &prog_list, list)
-        { list_del(&pcursor->list); kfree(pcursor); }
-    list_for_each_entry_safe(ucursor, utmp, &uid_list, list)
-        { list_del(&ucursor->list); kfree(ucursor); }
-    list_for_each_entry_safe(scursor, stmp, &syscall_list, list)
-        { list_del(&scursor->list); kfree(scursor); }
+    hash_for_each_safe(prog_table, bkt, htmp, pcursor, hnode)
+        { hash_del(&pcursor->hnode); kfree(pcursor); }
+    hash_for_each_safe(uid_table, bkt, htmp, ucursor, hnode)
+        { hash_del(&ucursor->hnode); kfree(ucursor); }
+    bitmap_clear(syscall_bitmap, 0, NR_syscalls);
     spin_unlock_irqrestore(&config_lock, flags);
 
     throttle_dev_unregister();

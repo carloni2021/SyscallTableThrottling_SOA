@@ -63,28 +63,25 @@ static void get_caller_exe_info(unsigned long *ino, dev_t *dev,
     mmap_read_unlock(mm);
 }
 
-//verifica se chiamante/syscall sono registrati
+/* Verifica se il processo corrente è nel set monitorato (per inode/device o euid).
+ * hash_for_each_possible itera solo il bucket della chiave → O(1) atteso. */
 static int caller_is_registered(unsigned long ino, dev_t dev, uid_t euid)
 {
     struct prog_node *pnode;
     struct uid_node  *unode;
     if (ino) {
-        list_for_each_entry(pnode, &prog_list, list)
+        hash_for_each_possible(prog_table, pnode, hnode, ino)
             if (pnode->inode == ino && pnode->device == dev) return 1;
     }
-    list_for_each_entry(unode, &uid_list, list)
+    hash_for_each_possible(uid_table, unode, hnode, euid)
         if (unode->uid == euid) return 1;
     return 0;
 }
 
-// Ricerca della syscall
-//Da implementare : bitmap o hashtable
+/* Verifica se la syscall nr è nel set monitorato — O(1) con test_bit. */
 static int syscall_is_registered(int nr)
 {
-    struct syscall_node *snode;
-    list_for_each_entry(snode, &syscall_list, list)
-        if (snode->nr == nr) return 1;
-    return 0;
+    return test_bit(nr, syscall_bitmap);
 }
 
 /* ================================================================
@@ -113,8 +110,11 @@ static enum hrtimer_restart window_timer_fn(struct hrtimer *timer)
         }
         spin_unlock_irqrestore(&stats_lock, flags);
     }
-    // Una volta aggiornate le statistiche, svegliamo tutti i thread in attesa su throttle_wq. I thread risveglieranno e verificheranno se possono procedere o devono continuare ad aspettare.
-    wake_up_all(&throttle_wq);
+    /* Sveglia al più max_calls thread: tanti quanti i slot disponibili nella nuova finestra.
+     * wake_up_all causerebbe thundering herd (tutti i thread bloccati si svegliano
+     * e quasi tutti tornano subito a dormire); wake_up_nr limita il risveglio ai soli
+     * thread che hanno ragionevole probabilità di ottenere un slot. */
+    wake_up_nr(&throttle_wq, READ_ONCE(max_calls));
     hrtimer_forward_now(timer, ktime_set(1, 0));
     return HRTIMER_RESTART;
 }
@@ -146,7 +146,7 @@ void throttle_check(int nr)
     ktime_t       enter_time, exit_time;
     long long     delay_ns;
 
-    if (!monitor_enabled) return;
+    if (!READ_ONCE(monitor_enabled)) return;
 
     get_caller_exe_info(&exe_ino, &exe_dev, comm, TASK_COMM_LEN);
     euid = from_kuid(&init_user_ns, current_euid());
@@ -174,7 +174,10 @@ void throttle_check(int nr)
             /* READ_ONCE: necessario perché module_unloading è scritto con
              * smp_store_release; senza READ_ONCE il compilatore potrebbe
              * cachare il valore in un registro e non vedere mai l'aggiornamento. */
-            ret = wait_event_interruptible(throttle_wq,
+            /* _exclusive: registra il thread come waiter esclusivo, così
+             * wake_up_nr(max_calls) sveglia esattamente max_calls thread
+             * invece di tutti (thundering herd). */
+            ret = wait_event_interruptible_exclusive(throttle_wq,
                       atomic_read(&call_count) < max_calls ||
                       !monitor_enabled || READ_ONCE(module_unloading));
             if (ret != 0 || !monitor_enabled || READ_ONCE(module_unloading)) break;
