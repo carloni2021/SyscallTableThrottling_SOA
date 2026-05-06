@@ -96,11 +96,11 @@ static void __exit throttle_exit(void)
     printk(KERN_INFO "<throttle>: exit [2] unloading segnalato\n");
 
     /* [3] Rimuove gli hook SCT: nuove syscall vanno all'handler originale.
-     * I thread già dentro generic_sct_wrapper continuano fino al drain. */
+     * I thread già dentro generic_sct_wrapper continuano fino al completamento. */
     remove_all_hooks();
     printk(KERN_INFO "<throttle>: exit [3] hooks SCT rimossi\n");
 
-    /* [4] Quiescence 1: garantisce che CPU con il vecchio ptr SCT abbiano
+    /* [4] garantisce che CPU con il vecchio ptr SCT abbiano
      * avuto il tempo di entrare in generic_sct_wrapper (e incrementare
      * active_threads_in_wrapper) prima che controlliamo il contatore. */
     synchronize_rcu();
@@ -109,7 +109,7 @@ static void __exit throttle_exit(void)
     wait_event(unload_wq, atomic_read(&active_threads_in_wrapper) == 0);
     printk(KERN_INFO "<throttle>: exit [5] drain completato\n");
 
-    /* [6] Quiescence 2: barriera finale su tutti i CPU */
+    /* [6] barriera finale su tutti i CPU */
     synchronize_rcu();
 
 //Solo per i kernel >= 5.15 perchè solo lì viene patchato x64_sys_call, ma in futuro se si dovesse patchare anche su kernel più vecchi, questa funzione dovrebbe essere chiamata comunque per ripristinare la funzione originale e liberare lo stub.

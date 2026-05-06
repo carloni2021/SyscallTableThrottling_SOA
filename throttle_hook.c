@@ -14,6 +14,7 @@
 #include "throttle.h"
 
 struct hook_entry {
+    //nr della syscall hookata, handler originale salvato, flag di attivazione
     int           nr;
     syscall_fn_t  orig_fn;
     int           active;
@@ -23,16 +24,9 @@ static struct hook_entry hooks[MAX_HOOKED_SYSCALLS];
 static DEFINE_MUTEX(hook_mutex);
 
 /*
- * generic_sct_wrapper — unico handler per tutte le syscall hookate.
- *
- * Non usa try_module_get: il refcount del modulo rimane 0, permettendo a rmmod
- * di chiamare throttle_exit anche con thread bloccati in throttle_check.
- * Il drain è gestito da active_threads_in_wrapper + unload_wq in throttle_main.c.
- *
- * Race durante unload: se l'hook viene rimosso mentre questo thread era già
- * in transito verso generic_sct_wrapper (aveva letto il vecchio ptr SCT),
- * hooks[i].active sarà 0 ma sys_call_table_ptr[nr] punta già all'handler originale.
- * In quel caso lo chiamiamo direttamente.
+generic_sct_wrapper — unico handler per tutte le syscall hookate.
+N.B. Non usa try_module_get (refcount rimane a 0) permettendo rmmod
+Il problema dei thread attivi è gestito da active_threads_in_wrapper + unload_wq in throttle_main.c. 
  */
 static asmlinkage long generic_sct_wrapper(const struct pt_regs *regs)
 {
@@ -40,7 +34,7 @@ static asmlinkage long generic_sct_wrapper(const struct pt_regs *regs)
     syscall_fn_t orig_fn = NULL;
     long ret;
     int i;
-
+    //tiene traccia di n. thread attivi dentro al mio wrapper (servirà nella parte di unload)
     atomic_inc(&active_threads_in_wrapper);
 
     for (i = 0; i < MAX_HOOKED_SYSCALLS; i++) {
@@ -50,10 +44,16 @@ static asmlinkage long generic_sct_wrapper(const struct pt_regs *regs)
         }
     }
 
+    /*NOTA BENE 
+    * le successive righe risolvono la condizione di parallelismo in cui: 
+    * un thread entra in generic_sct_wrapper
+    * mentre un altro thread sta rimuovendo l'hook
+    */
+
+    //se orgig_fn null allora la syscall non è più hookata (es. è stata rimossa mentre eravamo in throttle_check)
     if (!orig_fn) {
-        /* Hook rimosso durante il transito (race di unload): chiama l'handler
-         * originale direttamente dalla tabella, che è già stata ripristinata. */
         ret = (sys_call_table_ptr && nr < NR_syscalls)
+        //controlla se sys_call_table_ptr è valido e nr è un numero di syscall valido, se sì chiama direttamente la syscall originale senza wrapper, altrimenti ritorna -ENOSYS
               ? sys_call_table_ptr[nr](regs)
               : -ENOSYS;
         if (atomic_dec_and_test(&active_threads_in_wrapper) &&
@@ -66,7 +66,8 @@ static asmlinkage long generic_sct_wrapper(const struct pt_regs *regs)
 
     /* Il drain segnala completamento DOPO orig_fn: il decremento deve avvenire
      * dopo la chiamata per evitare che throttle_exit liberi la memoria del modulo
-     * mentre siamo ancora dentro generic_sct_wrapper (use-after-free). */
+     * mentre siamo ancora dentro generic_sct_wrapper (use-after-free).
+    */
     ret = orig_fn(regs);
     if (atomic_dec_and_test(&active_threads_in_wrapper) &&
         smp_load_acquire(&module_unloading))
@@ -83,12 +84,14 @@ int install_hook(int nr)
 
     mutex_lock(&hook_mutex);
 
+    // Controlla se la syscall è già hookata    
     for (i = 0; i < MAX_HOOKED_SYSCALLS; i++)
         if (hooks[i].active && hooks[i].nr == nr) {
             mutex_unlock(&hook_mutex);
             return 0;
         }
 
+    // Cerca uno slot libero per il nuovo hook
     for (i = 0; i < MAX_HOOKED_SYSCALLS; i++)
         if (!hooks[i].active) break;
     if (i == MAX_HOOKED_SYSCALLS) {
@@ -96,14 +99,15 @@ int install_hook(int nr)
         return -ENOMEM;
     }
 
+    // Installa l'hook: salva l'handler originale, scrive generic_sct_wrapper sulla sys_call_table, marca l'hook come attivo
     hooks[i].nr      = nr;
     hooks[i].orig_fn = sys_call_table_ptr[nr];
     hooks[i].active  = 1;
 
+    // Scrittura sulla sys_call_table protetta da begin/end_syscall_table_hack, con memory barrier per garantire visibilità su altri core
     begin_syscall_table_hack();
     sys_call_table_ptr[nr] = generic_sct_wrapper;
     end_syscall_table_hack();
-    mb();
 
     printk(KERN_INFO "<throttle>: [HOOK+] nr=%d orig=%px\n",
            nr, (void *)hooks[i].orig_fn);
