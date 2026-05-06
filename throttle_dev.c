@@ -33,9 +33,9 @@ static int caller_is_root(void)
 /* Handler IOCTL per tutte le operazioni di configurazione e query.
  -verifica i privilegi del chiamante
  -gestisce le liste di 
-    -programmi
-    -UID
-    -syscall
+    -programmi (hash table)
+    -UID       (hash table)
+    -syscall   (bitmap)
  -abilita/disabilita il monitoraggio
  -imposta il limite di chiamate 
  -restituisce statistiche.*/
@@ -54,33 +54,42 @@ static long ioctl_handler(struct file *filep,
     int          nr_val;
     unsigned long flags;
 
+    // Solo i comandi di lettura sono accessibili a tutti, gli altri richiedono privilegi root
     int read_only = (cmd == IOCTL_LIST_PROGS   ||
                      cmd == IOCTL_LIST_UIDS     ||
                      cmd == IOCTL_LIST_SYSCALLS ||
                      cmd == IOCTL_GET_STATUS    ||
                      cmd == IOCTL_GET_STATS);
 
+    // Controllo dei privilegi: se il comando non è di sola lettura e il chiamante non è root, negare l'accesso
     if (!read_only && !caller_is_root()) {
         printk(KERN_WARNING "<throttle>: accesso negato a euid=%u\n",
                from_kuid(&init_user_ns, current_euid()));
         return -EPERM;
     }
 
+    //effettiva gestione comandi
     switch (cmd) {
 
+    //Aggiunta tramite progname
     case IOCTL_ADD_PROG: {
         struct path kpath;
+        // Copia sicura del percorso del programma da spazio utente a kernel
         if (copy_from_user(prog_path, (char __user *)arg, PROG_PATH_MAX))
             return -EFAULT;
+        // Assicura che la stringa sia null-terminated (buff overflow)
         prog_path[PROG_PATH_MAX - 1] = '\0';
+        // Risolve il percorso per inode e device
         if (kern_path(prog_path, LOOKUP_FOLLOW, &kpath))
             return -ENOENT;
+        // Crea un nuovo nodo per il programma e popola i campi
         pnode = kmalloc(sizeof(*pnode), GFP_KERNEL);
         if (!pnode) { path_put(&kpath); return -ENOMEM; }
         pnode->inode  = kpath.dentry->d_inode->i_ino;
         pnode->device = kpath.dentry->d_inode->i_sb->s_dev;
         strscpy(pnode->fpath, prog_path, PROG_PATH_MAX);
         path_put(&kpath);
+        // Aggiunge il nodo alla hash table dei programmi monitorati, evitando duplicati
         spin_lock_irqsave(&config_lock, flags);
         hash_for_each_possible(prog_table, pcursor, hnode, pnode->inode) {
             if (pcursor->inode == pnode->inode && pcursor->device == pnode->device) {
@@ -95,16 +104,20 @@ static long ioctl_handler(struct file *filep,
         break;
     }
 
+    //Rimozione tramite progname
     case IOCTL_DEL_PROG: {
         struct path kpath;
         unsigned long del_ino; dev_t del_dev;
+        // Copia sicura del percorso del programma da spazio utente a kernel
         if (copy_from_user(prog_path, (char __user *)arg, PROG_PATH_MAX))
             return -EFAULT;
         prog_path[PROG_PATH_MAX - 1] = '\0';
+        //Controlla se il percorso esiste e ottiene inode e device per la rimozione
         if (kern_path(prog_path, LOOKUP_FOLLOW, &kpath)) return -ENOENT;
         del_ino = kpath.dentry->d_inode->i_ino;
         del_dev = kpath.dentry->d_inode->i_sb->s_dev;
         path_put(&kpath);
+        // Rimuove il nodo corrispondente dalla hash table dei programmi monitorati
         spin_lock_irqsave(&config_lock, flags);
         hash_for_each_possible_safe(prog_table, pcursor, htmp, hnode, del_ino)
             if (pcursor->inode == del_ino && pcursor->device == del_dev) {
@@ -114,29 +127,37 @@ static long ioctl_handler(struct file *filep,
         break;
     }
 
+    //elenca progname monitorati
     case IOCTL_LIST_PROGS: {
         int bkt;
         plist = kzalloc(sizeof(*plist), GFP_KERNEL);
         if (!plist) return -ENOMEM;
         spin_lock_irqsave(&config_lock, flags);
+        // Itera su tutti i bucket della hash table dei programmi monitorati e copia i percorsi in uscita
         hash_for_each(prog_table, bkt, pcursor, hnode) {
             if (plist->count < MAX_REG_PROGS)
                 strscpy(plist->paths[plist->count++], pcursor->fpath, PROG_PATH_MAX);
         }
         spin_unlock_irqrestore(&config_lock, flags);
+        // Copia sicura della lista dei programmi monitorati dallo spazio kernel a quello utente
         if (copy_to_user((struct throttle_prog_list __user *)arg, plist, sizeof(*plist))) {
             kfree(plist); return -EFAULT;
         }
+        // Libera la memoria allocata per la lista dei programmi monitorati
         kfree(plist);
         break;
     }
 
+    //SEZZIONE UID
+    // Aggiunta tramite UID
     case IOCTL_ADD_UID:
         if (copy_from_user(&uid_val, (unsigned int __user *)arg, sizeof(uid_val)))
             return -EFAULT;
+        // Crea un nuovo nodo per l'UID e popola i campi
         unode = kmalloc(sizeof(*unode), GFP_KERNEL);
         if (!unode) return -ENOMEM;
         unode->uid = (uid_t)uid_val;
+
         spin_lock_irqsave(&config_lock, flags);
         hash_for_each_possible(uid_table, ucursor, hnode, uid_val) {
             if (ucursor->uid == (uid_t)uid_val) {
@@ -146,9 +167,11 @@ static long ioctl_handler(struct file *filep,
         }
         hash_add(uid_table, &unode->hnode, unode->uid);
         spin_unlock_irqrestore(&config_lock, flags);
+
         printk(KERN_INFO "<throttle>: [UID+] %u\n", uid_val);
         break;
 
+    // Rimozione tramite UID
     case IOCTL_DEL_UID:
         if (copy_from_user(&uid_val, (unsigned int __user *)arg, sizeof(uid_val)))
             return -EFAULT;
@@ -158,6 +181,7 @@ static long ioctl_handler(struct file *filep,
         spin_unlock_irqrestore(&config_lock, flags);
         break;
 
+    // Elenca UID monitorati
     case IOCTL_LIST_UIDS: {
         int bkt;
         memset(&ulist, 0, sizeof(ulist));
@@ -170,6 +194,7 @@ static long ioctl_handler(struct file *filep,
         break;
     }
 
+    //Aggiunta avviene tramite numero di syscall (nr) e viene gestita con una bitmap per efficienza.
     case IOCTL_ADD_SYSCALL: {
         /* Bitmap: test_bit O(1); nessuna allocazione, nessuna lista */
         int hret;
@@ -186,6 +211,7 @@ static long ioctl_handler(struct file *filep,
         break;
     }
 
+    //Rimozione syscall
     case IOCTL_DEL_SYSCALL:
         if (copy_from_user(&nr_val, (int __user *)arg, sizeof(nr_val)))
             return -EFAULT;
@@ -196,10 +222,12 @@ static long ioctl_handler(struct file *filep,
         remove_hook(nr_val);
         break;
 
+    //Elenco syscall monitorate
     case IOCTL_LIST_SYSCALLS: {
         int bit;
         memset(&slist, 0, sizeof(slist));
         spin_lock_irqsave(&config_lock, flags);
+        // Itera su tutti i bit della bitmap
         for_each_set_bit(bit, syscall_bitmap, NR_syscalls)
             if (slist.count < MAX_HOOKED_SYSCALLS) slist.nrs[slist.count++] = bit;
         spin_unlock_irqrestore(&config_lock, flags);
@@ -208,6 +236,7 @@ static long ioctl_handler(struct file *filep,
         break;
     }
 
+    //Sezione monitoraggio: abilitazione/disabilitazione e query stato
     case IOCTL_SET_MONITOR:
         if (copy_from_user(&nr_val, (int __user *)arg, sizeof(nr_val)))
             return -EFAULT;
@@ -231,23 +260,31 @@ static long ioctl_handler(struct file *filep,
         break;
     }
 
+    // Imposta il limite di chiamate per finestra.
     case IOCTL_SET_MAX:
         if (copy_from_user(&nr_val, (int __user *)arg, sizeof(nr_val)))
             return -EFAULT;
         if (nr_val < 0) return -EINVAL;
+
+        //modifica max_calls
         spin_lock_irqsave(&config_lock, flags);
         max_calls = nr_val;
         spin_unlock_irqrestore(&config_lock, flags);
+
+        //reset statistiche
         spin_lock_irqsave(&stats_lock, flags);
         peak_delay_ns = 0; peak_delay_uid = 0;
+        //memset per azzerare il nome del programma associato al picco di ritardo
         memset(peak_delay_prog, 0, TASK_COMM_LEN);
         peak_blocked = 0; total_blocked_sum = 0; total_blocked_count = 0;
         spin_unlock_irqrestore(&stats_lock, flags);
+
         /* Sveglia al più nr_val thread: coerente con i nuovi slot disponibili */
         wake_up_nr(&throttle_wq, nr_val);
         printk(KERN_INFO "<throttle>: MAX=%d\n", nr_val);
         break;
 
+    //azzera le statistiche di ritardo e thread bloccati
     case IOCTL_RESET_STATS:
         spin_lock_irqsave(&stats_lock, flags);
         peak_delay_ns = 0; peak_delay_uid = 0;
@@ -256,6 +293,7 @@ static long ioctl_handler(struct file *filep,
         spin_unlock_irqrestore(&stats_lock, flags);
         break;
 
+    //Stampa le statistiche di ritardo e thread bloccati, con protezione tramite spinlock per garantire coerenza dei dati durante la lettura.
     case IOCTL_GET_STATS:
         spin_lock_irqsave(&stats_lock, flags);
         stats_out.peak_delay_ns       = peak_delay_ns;
@@ -265,6 +303,7 @@ static long ioctl_handler(struct file *filep,
         stats_out.avg_blocked_threads  = (total_blocked_count > 0)
             ? (total_blocked_sum / total_blocked_count) : 0;
         spin_unlock_irqrestore(&stats_lock, flags);
+        // Copia sicura delle statistiche dallo spazio kernel a quello utente
         if (copy_to_user((struct throttle_stats __user *)arg, &stats_out, sizeof(stats_out)))
             return -EFAULT;
         break;
@@ -275,6 +314,7 @@ static long ioctl_handler(struct file *filep,
     return 0;
 }
 
+// Struttura file_operations che definisce le operazioni supportate dal device, inclusa la gestione degli IOCTL.
 static const struct file_operations fops = {
     .owner          = THIS_MODULE,
     .open           = dev_open,
@@ -282,12 +322,16 @@ static const struct file_operations fops = {
     .unlocked_ioctl = ioctl_handler,
 };
 
+// Registra il device a caratteri e associa le operazioni definite in fops.
+//Il major viene assegnato dinamicamente e restituito per la creazione dell'interfaccia device.
 int throttle_dev_register(void)
 {
     major = register_chrdev(0, DEVICE_NAME, &fops);
     return major;
 }
 
+//Funzione di cleanup che deregistra il device a caratteri,
+//rimuovendo l'associazione con /dev/throttleDriver e liberando le risorse allocate per l'interfaccia device.
 void throttle_dev_unregister(void)
 {
     unregister_chrdev(major, DEVICE_NAME);

@@ -4,7 +4,7 @@
  *
  * sys_call_table: scansione del virtual address space [0xffffffff00000000, MAX)
  *   con heuristica su 7 indici noti di sys_ni_syscall.
- *   Basato su usctm.c del prof. Francesco Quaglia.
+ *   Basato su usctm.c del Professor Francesco Quaglia.
  *
  * x64_sys_call (kernel >= 5.15), percorso unico:
  *   LSTAR MSR → entry_SYSCALL_64 → scan do_syscall_64
@@ -32,10 +32,12 @@
  *  SYS_CALL_TABLE FINDER — scansione [0xffffffff00000000, MAX)
  * ================================================================ */
 
-//indici noti di sys_ni_syscall in sys_call_table, usati per identificare la posizione della tabella durante la scansione del virtual address space.
+//indici noti di sys_ni_syscall in sys_call_table, usati per identificare la posizione della tabella
+//durante la scansione del virtual address space.
 #define SCT_START  0xffffffff00000000ULL
 #define SCT_MAX    0xfffffffffff00000ULL
-//Questi indici sono stati identificati empiricamente su diverse versioni del kernel e sono generalmente stabili, ma potrebbero variare in future versioni del kernel.
+//Questi indici sono stati identificati empiricamente su diverse versioni del kernel
+//sono generalmente stabili, ma potrebbero variare in future versioni del kernel.
 #define NI_1  134
 #define NI_2  174
 #define NI_3  182
@@ -56,12 +58,18 @@ static int sct_good_area(unsigned long *addr)
     return 1;
 }
 
-// Scansiona la memoria a partire da SCT_START, pagina per pagina, verificando se è mappata e se contiene una potenziale sys_call_table tramite sct_validate_page.
+//Controlla se la pagina puntata da addr contiene una potenziale sys_call_table
+//verificando i 7 indici noti di sys_ni_syscall e la coerenza dei valori.
+//Se trova una potenziale tabella, salva l'indirizzo di sys_ni_syscall e sys_call_table_ptr e restituisce 1; altrimenti restituisce 0.
 static int sct_validate_page(unsigned long *addr)
 {
     int i;
     unsigned long page = (unsigned long)addr;
 
+    //Scansiona la pagina, con step di sizeof(void *), verificando se la posizione dei 7 indici noti di sys_ni_syscall è coerente
+    //(puntano allo stesso valore, che deve essere > 0xffffffff00000000 e non deve essere 0 o piccolo).
+    //Se trova una potenziale sys_call_table, salva gli indirizzi e restituisce 1.
+    //Se attraversa una pagina non mappata, si ferma per evitare kernel panic.
     for (i = 0; i < (int)PAGE_SIZE; i += (int)sizeof(void *)) {
         unsigned long new_page = page + i + NI_7 * sizeof(void *);
 
@@ -70,6 +78,11 @@ static int sct_validate_page(unsigned long *addr)
             break;
 
         addr = (unsigned long *)(page + i);
+        /*
+        * Verifica i 7 indici noti di sys_ni_syscall:
+        * devono puntare allo stesso valore, che deve essere > 0xffffffff00000000 (alto)
+        * e non deve essere 0 o piccolo (non valido).
+        */
         if ((addr[NI_1] & 0x3) == 0 &&
              addr[NI_1] != 0 &&
              addr[NI_1] > 0xffffffff00000000ULL &&
@@ -80,6 +93,8 @@ static int sct_validate_page(unsigned long *addr)
              addr[NI_1] == addr[NI_6] &&
              addr[NI_1] == addr[NI_7] &&
              sct_good_area(addr)) {
+            //Controllo aggiuntivo in sct_good_area per verificare che i primi n indici non siano uguali a sys_ni_syscall, per evitare falsi positivi.
+            //potenziale sys_call_table trovata: salva gli indirizzi di sys_ni_syscall e sys_call_table_ptr, poi restituisce 1.
             hacked_ni_syscall  = (unsigned long *)(addr[NI_1]);
             sys_call_table_ptr = (syscall_fn_t *)addr;
             return 1;
