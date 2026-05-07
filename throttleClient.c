@@ -31,12 +31,14 @@
 
 struct throttle_stats {
     long long    peak_delay_ns;
+    long long    avg_delay_ns;
     char         peak_delay_prog[TASK_COMM_LEN];
     unsigned int peak_delay_uid;
     long         avg_blocked_threads;
     long         peak_blocked_threads;
     long         peak_calls_per_window;
     long         avg_calls_per_window;
+    long long    total_calls;
 };
 
 #define IOCTL_ADD_PROG      _IOW('T',  1, char[PROG_PATH_MAX])
@@ -141,10 +143,13 @@ int main(int argc, char *argv[])
         ret = ioctl(fd, IOCTL_GET_STATS, &s);
         if (ret == 0) {
             printf("=== Statistiche throttleDriver ===\n");
+            printf("  Totale chiamate:      %lld\n",   s.total_calls);
             printf("  Peak calls/finestra:  %ld\n",   s.peak_calls_per_window);
             printf("  Avg  calls/finestra:  %ld\n",   s.avg_calls_per_window);
             printf("  Peak delay:           %lld ns (%.3f ms)\n",
                    s.peak_delay_ns, s.peak_delay_ns / 1e6);
+            printf("  Avg  delay:           %lld ns (%.3f ms)\n",
+                   s.avg_delay_ns, s.avg_delay_ns / 1e6);
             printf("  Peak delay prog:      '%s'\n",  s.peak_delay_prog);
             printf("  Peak delay uid:       %u\n",    s.peak_delay_uid);
             printf("  Peak thread bloccati: %ld\n",   s.peak_blocked_threads);

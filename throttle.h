@@ -75,12 +75,14 @@ struct throttle_status {
 
 struct throttle_stats {
     long long peak_delay_ns;
+    long long avg_delay_ns;
     char      peak_delay_prog[TASK_COMM_LEN];
     uid_t     peak_delay_uid;
     long      avg_blocked_threads;
     long      peak_blocked_threads;
     long      peak_calls_per_window;
     long      avg_calls_per_window;
+    long long total_calls;
 };
 #define IOCTL_GET_STATS     _IOR('T', 13, struct throttle_stats)
 #define IOCTL_RESET_STATS   _IO ('T', 14)
@@ -152,6 +154,8 @@ extern wait_queue_head_t throttle_wq;
  * ================================================================ */
 
 extern long long  peak_delay_ns;
+extern long long  total_delay_ns;
+extern long       delay_count;
 extern char       peak_delay_prog[TASK_COMM_LEN];
 extern uid_t      peak_delay_uid;
 extern atomic_t   current_blocked;

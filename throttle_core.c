@@ -21,6 +21,8 @@
 *  In un'implementazione più sofisticata, si potrebbero usare strutture dati separate e lock più granulari per ridurre la contesa.
 */
 long long  peak_delay_ns                    = 0;
+long long  total_delay_ns                   = 0;
+long       delay_count                      = 0;
 char       peak_delay_prog[TASK_COMM_LEN]   = {0};
 uid_t      peak_delay_uid                   = 0;
 atomic_t   current_blocked                  = ATOMIC_INIT(0);
@@ -236,5 +238,7 @@ void throttle_check(int nr)
         peak_delay_uid = euid;
         strscpy(peak_delay_prog, comm, TASK_COMM_LEN);
     }
+    total_delay_ns += delay_ns;
+    delay_count    += 1;
     spin_unlock_irqrestore(&stats_lock, flags);
 }

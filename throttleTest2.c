@@ -69,12 +69,14 @@
 
 struct throttle_stats {
     long long    peak_delay_ns;
+    long long    avg_delay_ns;
     char         peak_delay_prog[TASK_COMM_LEN];
     unsigned int peak_delay_uid;
     long         avg_blocked_threads;
     long         peak_blocked_threads;
     long         peak_calls_per_window;
     long         avg_calls_per_window;
+    long long    total_calls;
 };
 
 #define IOCTL_ADD_PROG    _IOW('T',  1, char[PROG_PATH_MAX])
@@ -199,9 +201,12 @@ static int test_blocking(int drv_fd, const char *progpath,
     printf("\n  -- Statistiche driver (per-finestra, allineate all'hrtimer) --\n");
     printf("  Peak calls/finestra : %ld\n",   st.peak_calls_per_window);
     printf("  Avg  calls/finestra : %ld\n",   st.avg_calls_per_window);
-    printf("  Totale chiamate     : %ld in %d s\n", total, duration);
+    printf("  Totale chiamate     : %lld in %d s (misurato dal driver)\n",
+           st.total_calls, duration);
     printf("  Peak delay          : %lld ns (%.3f ms)\n",
            st.peak_delay_ns, st.peak_delay_ns / 1e6);
+    printf("  Avg  delay          : %lld ns (%.3f ms)\n",
+           st.avg_delay_ns, st.avg_delay_ns / 1e6);
     printf("  Peak delay prog     : '%s'  uid=%u\n",
            st.peak_delay_prog, st.peak_delay_uid);
     printf("  Peak bloccati       : %ld thread\n", st.peak_blocked_threads);
@@ -428,6 +433,8 @@ static int test_uid(int drv_fd, int nworkers, int duration, int max_val)
     printf("\n  -- Statistiche driver --\n");
     printf("  Peak delay      : %lld ns (%.3f ms)\n",
            st.peak_delay_ns, st.peak_delay_ns / 1e6);
+    printf("  Avg  delay      : %lld ns (%.3f ms)\n",
+           st.avg_delay_ns, st.avg_delay_ns / 1e6);
     printf("  Peak delay prog : '%s'  uid=%u\n",
            st.peak_delay_prog, st.peak_delay_uid);
     printf("  Peak bloccati   : %ld processi\n", st.peak_blocked_threads);
@@ -679,6 +686,8 @@ static int test_monitor_toggle(int drv_fd, const char *progpath,
     printf("\n  -- Statistiche driver (fase A) --\n");
     printf("  Peak delay    : %lld ns (%.3f ms)\n",
            st.peak_delay_ns, st.peak_delay_ns / 1e6);
+    printf("  Avg  delay    : %lld ns (%.3f ms)\n",
+           st.avg_delay_ns, st.avg_delay_ns / 1e6);
     printf("  Peak bloccati : %ld thread\n", st.peak_blocked_threads);
     printf("  Avg  bloccati : %ld thread\n", st.avg_blocked_threads);
 

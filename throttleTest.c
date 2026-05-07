@@ -46,13 +46,14 @@
 
 struct throttle_stats {
     long long    peak_delay_ns;
+    long long    avg_delay_ns;
     char         peak_delay_prog[TASK_COMM_LEN];
     unsigned int peak_delay_uid;
     long         avg_blocked_threads;
     long         peak_blocked_threads;
-    // Aggiunta per il test: media calls/finestra (allineata all'hrtimer del driver)
-    long         avg_calls_per_window;
     long         peak_calls_per_window;
+    long         avg_calls_per_window;
+    long long    total_calls;
 };
 
 #define IOCTL_ADD_PROG    _IOW('T',  1, char[PROG_PATH_MAX])
@@ -293,7 +294,8 @@ int main(int argc, char *argv[])
     printf("\n=========================================\n");
     printf("  Risultati\n");
     printf("=========================================\n");
-    printf("  Totale chiamate : %ld in %d s\n", total, duration);
+    printf("  Totale chiamate : %lld in %d s (misurato dal driver)\n",
+           got_stats ? stats.total_calls : (long long)total, duration);
     printf("  Media effettiva : %.1f calls/s\n", avg);
     printf("  MAX configurato : %d calls/s\n", max_val);
 
@@ -303,6 +305,8 @@ int main(int argc, char *argv[])
         printf("  Avg  calls/finestra : %ld\n",   stats.avg_calls_per_window);
         printf("  Peak delay          : %lld ns (%.3f ms)\n",
                stats.peak_delay_ns, stats.peak_delay_ns / 1e6);
+        printf("  Avg  delay          : %lld ns (%.3f ms)\n",
+               stats.avg_delay_ns, stats.avg_delay_ns / 1e6);
         printf("  Peak delay prog     : '%s'\n",  stats.peak_delay_prog);
         printf("  Peak delay uid      : %u\n",    stats.peak_delay_uid);
         printf("  Peak bloccati       : %ld thread\n", stats.peak_blocked_threads);
