@@ -4,17 +4,17 @@
  * Il programma:
  *   1. Apre /dev/throttleDriver e configura il driver (registra se stesso
  *      come prog, registra la syscall, imposta MAX, abilita il monitor)
- *   2. Lancia N thread che invocano la syscall il più velocemente possibile
- *   3. Misura il throughput effettivo ogni secondo
- *   4. Al termine legge le statistiche dal driver
- *   5. Verifica automaticamente che il throttling abbia funzionato
- *   6. Ripristina la configurazione del driver e stampa PASS / FAIL
+ *   2. Lancia N thread che invocano la syscall al ritmo richiesto
+ *   3. Al termine legge le statistiche dal driver
+ *   4. Verifica automaticamente che il throttling abbia funzionato
+ *   5. Ripristina la configurazione del driver e stampa PASS / FAIL
  *
  * Uso:
- *   sudo ./throttleTest <num_thread> <durata_sec> <MAX>
+ *   sudo ./throttleTest <num_thread> <durata_sec> <MAX> [rate_per_thread]
  *
  * Esempio:
- *   sudo ./throttleTest 8 6 200
+ *   sudo ./throttleTest 8 6 200          — thread a velocità massima
+ *   sudo ./throttleTest 8 6 200 50       — ogni thread tenta 50 calls/s
  *
  * Note:
  *   - Richiede root per le ioctl di configurazione del driver.
@@ -75,6 +75,7 @@ static int          syscall_nr  = SYS_getpid;
 struct thread_arg {
     int  id;
     long calls_done;
+    long interval_ns;   /* 0 = velocità massima, >0 = ns tra una call e la successiva */
 };
 
 /* ================================================================
@@ -86,10 +87,29 @@ static void *worker(void *arg)
     struct thread_arg *ta = arg;
     long count = 0;
 
-    while (running) {
-        syscall(syscall_nr);
-        count++;
-        atomic_fetch_add(&total_calls, 1);
+    if (ta->interval_ns > 0) {
+        /* Modalità rate controllato: usa clock_nanosleep con tempo assoluto
+         * per mantenere il ritmo indipendentemente dalla durata della syscall. */
+        struct timespec next;
+        clock_gettime(CLOCK_MONOTONIC, &next);
+        while (running) {
+            syscall(syscall_nr);
+            count++;
+            atomic_fetch_add(&total_calls, 1);
+            next.tv_nsec += ta->interval_ns;
+            if (next.tv_nsec >= 1000000000L) {
+                next.tv_sec  += 1;
+                next.tv_nsec -= 1000000000L;
+            }
+            clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL);
+        }
+    } else {
+        /* Modalità velocità massima: il throttling del driver è l'unico limite. */
+        while (running) {
+            syscall(syscall_nr);
+            count++;
+            atomic_fetch_add(&total_calls, 1);
+        }
     }
 
     ta->calls_done = count;
@@ -116,21 +136,29 @@ int main(int argc, char *argv[])
 {
     if (argc < 4) {
         fprintf(stderr,
-            "Uso: sudo %s <num_thread> <durata_sec> <MAX>\n"
-            "  num_thread:  thread concorrenti che invocano la syscall\n"
-            "  durata_sec:  durata del test (secondi)\n"
-            "  MAX:         invocazioni/s massime da impostare nel driver\n"
-            "Esempio: sudo %s 8 6 200\n",
-            argv[0], argv[0]);
+            "Uso: sudo %s <num_thread> <durata_sec> <MAX> [rate_per_thread]\n"
+            "  num_thread:      thread concorrenti che invocano la syscall\n"
+            "  durata_sec:      durata del test (secondi)\n"
+            "  MAX:             invocazioni/s massime da impostare nel driver\n"
+            "  rate_per_thread: (opzionale) calls/s che ogni thread tenta;\n"
+            "                   se omesso i thread girano a velocità massima\n"
+            "Esempio: sudo %s 8 6 200\n"
+            "         sudo %s 8 6 200 50\n",
+            argv[0], argv[0], argv[0]);
         return 1;
     }
 
-    int num_threads = atoi(argv[1]);
-    int duration    = atoi(argv[2]);
-    int max_val     = atoi(argv[3]);
+    int num_threads     = atoi(argv[1]);
+    int duration        = atoi(argv[2]);
+    int max_val         = atoi(argv[3]);
+    int rate_per_thread = (argc >= 5) ? atoi(argv[4]) : 0;
 
     if (num_threads <= 0 || duration <= 0 || max_val <= 0) {
-        fprintf(stderr, "Errore: tutti i parametri devono essere > 0.\n");
+        fprintf(stderr, "Errore: num_thread, durata_sec e MAX devono essere > 0.\n");
+        return 1;
+    }
+    if (argc >= 5 && rate_per_thread <= 0) {
+        fprintf(stderr, "Errore: rate_per_thread deve essere > 0.\n");
         return 1;
     }
 
@@ -161,6 +189,11 @@ int main(int argc, char *argv[])
     printf("  Thread    : %d\n", num_threads);
     printf("  Durata    : %d s\n", duration);
     printf("  MAX       : %d inv/s\n", max_val);
+    if (rate_per_thread > 0)
+        printf("  Rate/thr  : %d calls/s (totale tentato: %d calls/s)\n",
+               rate_per_thread, rate_per_thread * num_threads);
+    else
+        printf("  Rate/thr  : massima velocita'\n");
     printf("=========================================\n\n");
 
     /* ---- Configura il driver ---- */
@@ -186,9 +219,11 @@ int main(int argc, char *argv[])
     pthread_t         *threads = malloc(num_threads * sizeof(pthread_t));
     struct thread_arg *args    = malloc(num_threads * sizeof(struct thread_arg));
 
+    long interval_ns = (rate_per_thread > 0) ? (1000000000L / rate_per_thread) : 0;
     for (int i = 0; i < num_threads; i++) {
-        args[i].id = i;
-        args[i].calls_done = 0;
+        args[i].id          = i;
+        args[i].calls_done  = 0;
+        args[i].interval_ns = interval_ns;
         pthread_create(&threads[i], NULL, worker, &args[i]);
     }
 
