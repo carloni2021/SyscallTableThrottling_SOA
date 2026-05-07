@@ -14,3 +14,9 @@ modules.order
 throttleClient
 throttleTest
 throttleTest2
+
+# IDE
+.idea/
+
+# Config files
+*.json

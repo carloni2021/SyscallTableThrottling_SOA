@@ -59,6 +59,7 @@ struct throttle_stats {
 #define IOCTL_SET_MONITOR _IOW('T', 10, int)
 #define IOCTL_SET_MAX     _IOW('T', 12, int)
 #define IOCTL_GET_STATS   _IOR('T', 13, struct throttle_stats)
+#define IOCTL_RESET_STATS _IO('T', 14)
 
 /* ================================================================
  *  Stato globale del test
