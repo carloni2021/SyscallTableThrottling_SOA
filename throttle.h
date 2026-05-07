@@ -19,10 +19,8 @@
 #include <linux/uidgid.h>
 #include <linux/ktime.h>
 #include <linux/hrtimer.h>
-#include <linux/delay.h>
 #include <linux/wait.h>
 #include <linux/atomic.h>
-#include <linux/syscalls.h>
 #include <linux/version.h>
 #include <linux/mm.h>
 #include <linux/namei.h>

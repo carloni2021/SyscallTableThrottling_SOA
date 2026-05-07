@@ -85,11 +85,13 @@ inline void write_cr0_forced(unsigned long val)
 * cr0 è un registro di controllo che gestisce le operazioni di base del processore, come la protezione della memoria, il paging e le interruzioni.
 * cr4 è un registro di controllo che gestisce funzionalità avanzate del processore (gestisce anche la protezione per ROP)
 */
+#ifdef X86_CR4_CET
 static inline void write_cr4_forced(unsigned long val)
 {
     unsigned long __force_order;
     asm volatile("mov %0, %%cr4" : "+r"(val), "+m"(__force_order));
 }
+#endif
 //Funzioni per disabilitare e ripristinare la protezione in scrittura (CR0.WP) e CET (CR4.CET se presente) per patchare la sys_call_table
 void begin_syscall_table_hack(void)
 {

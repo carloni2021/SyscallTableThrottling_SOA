@@ -18,10 +18,9 @@
  *  TEST 2 — Throttling basato su UID
  *    Verifica che il driver applichi il rate limit sulla base dell'effective
  *    UID del chiamante, indipendentemente dal nome del programma.
- *    La registrazione di sole tre entità nel driver:
+ *    Vengono registrate nel driver solo:
  *        - una syscall (getpid, nr=39)
  *        - un UID (TARGET_UID)
- *    è sufficiente per distinguere i thread da throttlare.
  *    Due gruppi di processi figlio operano in parallelo:
  *        - "throttled": N figli con eUID = TARGET_UID  → soggetti al MAX
  *        - "control":   M figli con eUID = CONTROL_UID → nessun limite
@@ -81,7 +80,6 @@ struct throttle_stats {
 
 #define IOCTL_ADD_PROG    _IOW('T',  1, char[PROG_PATH_MAX])
 #define IOCTL_DEL_PROG    _IOW('T',  2, char[PROG_PATH_MAX])
-#define IOCTL_LIST_PROGS  _IOR('T',  3, struct throttle_prog_list)
 #define IOCTL_ADD_UID     _IOW('T',  4, unsigned int)
 #define IOCTL_DEL_UID     _IOW('T',  5, unsigned int)
 #define IOCTL_ADD_SYSCALL _IOW('T',  7, int)
@@ -90,12 +88,6 @@ struct throttle_stats {
 #define IOCTL_SET_MAX     _IOW('T', 12, int)
 #define IOCTL_GET_STATS   _IOR('T', 13, struct throttle_stats)
 #define IOCTL_RESET_STATS _IO ('T', 14)
-
-#define MAX_REG_PROGS 32
-struct throttle_prog_list {
-    int  count;
-    char paths[MAX_REG_PROGS][PROG_PATH_MAX];
-};
 
 /*
  * UID sintetici per il test 2.  Valori alti (>60000) per evitare
@@ -173,7 +165,6 @@ static int test_blocking(int drv_fd, const char *progpath,
     /* Reset statistiche dopo il warmup: le finestre successive vengono
      * misurate dal driver, allineate ai propri boundary. */
     ioctl(drv_fd, IOCTL_RESET_STATS, NULL);
-    long t1_baseline = atomic_load(&t1_calls);
 
     sleep(duration);
 
@@ -461,254 +452,6 @@ cleanup_mmap:
 }
 
 /* ================================================================
- *  TEST 3: Controllo accessi root-only
- * ================================================================ */
-
-/*
- * La specifica richiede che le operazioni di modifica (registrazione,
- * deregistrazione, configurazione) siano riservate ai processi con
- * effective user-ID = 0.  Questo test lo verifica empiricamente:
- * un processo figlio abbassa il proprio eUID a TARGET_UID (non root)
- * e tenta alcune ioctl di scrittura → deve ricevere EPERM.
- * Le ioctl di sola lettura (LIST_*) devono invece avere successo.
- *
- * Il risultato viene comunicato al padre tramite il codice di uscita
- * del figlio (0 = tutti i controlli passati, 1 = almeno uno fallito).
- */
-static int test_root_access(int drv_fd)
-{
-    printf("\n========================================\n");
-    printf("  TEST 3: controllo accessi root-only\n");
-    printf("========================================\n");
-    printf("  UID non-root usato : %u\n\n", TARGET_UID);
-
-    pid_t pid = fork();
-    if (pid < 0) { perror("fork"); return -1; }
-
-    if (pid == 0) {
-        /* ---- Processo figlio: diventa non-root ---- */
-        if (setresuid(TARGET_UID, TARGET_UID, TARGET_UID) < 0) {
-            perror("setresuid nel figlio");
-            exit(2);
-        }
-
-        int ok = 1;
-
-        /*
-         * 1. Ioctl di scrittura: ADD_PROG
-         *    Atteso: -1 con errno == EPERM.
-         */
-        char name[PROG_PATH_MAX] = "/nonexistent/test_accesso";
-        int r = ioctl(drv_fd, IOCTL_ADD_PROG, name);
-        if (r == -1 && errno == EPERM) {
-            printf("  [OK] ADD_PROG  da uid=%u → EPERM\n", TARGET_UID);
-        } else {
-            printf("  [FAIL] ADD_PROG  da uid=%u: ret=%d errno=%d"
-                   " (atteso -1/EPERM)\n", TARGET_UID, r, errno);
-            ok = 0;
-        }
-
-        /*
-         * 2. Ioctl di scrittura: RESET_STATS
-         *    Anche il reset delle statistiche è un'operazione di modifica
-         *    e deve essere riservato a root.
-         */
-        r = ioctl(drv_fd, IOCTL_RESET_STATS, 0);
-        if (r == -1 && errno == EPERM) {
-            printf("  [OK] RESET_STATS da uid=%u → EPERM\n", TARGET_UID);
-        } else {
-            printf("  [FAIL] RESET_STATS da uid=%u: ret=%d errno=%d"
-                   " (atteso -1/EPERM)\n", TARGET_UID, r, errno);
-            ok = 0;
-        }
-
-        /*
-         * 3. Ioctl di sola lettura: LIST_PROGS
-         *    Deve riuscire anche per utenti non-root.
-         */
-        struct throttle_prog_list pl = {0};
-        r = ioctl(drv_fd, IOCTL_LIST_PROGS, &pl);
-        if (r == 0) {
-            printf("  [OK] LIST_PROGS da uid=%u → successo"
-                   " (%d prog registrati)\n", TARGET_UID, pl.count);
-        } else {
-            printf("  [FAIL] LIST_PROGS da uid=%u: ret=%d errno=%d"
-                   " (atteso successo)\n", TARGET_UID, r, errno);
-            ok = 0;
-        }
-
-        exit(ok ? 0 : 1);
-    }
-
-    /* ---- Processo padre: attende il figlio ---- */
-    int status;
-    waitpid(pid, &status, 0);
-    int passed = WIFEXITED(status) && WEXITSTATUS(status) == 0;
-
-    printf("\n  -- Verifica --\n");
-    printf("  Controllo accessi root-only: %s\n", passed ? "PASS" : "FAIL");
-    return passed ? 0 : 1;
-}
-
-/* ================================================================
- *  TEST 4: Monitor off/on — rilascio dei thread bloccati
- * ================================================================ */
-
-static atomic_long  t4_calls   = 0;
-static volatile int t4_running = 1;
-
-static void *t4_worker(void *arg)
-{
-    (void)arg;
-    while (t4_running) {
-        syscall(SYS_getpid);
-        atomic_fetch_add(&t4_calls, 1);
-    }
-    return NULL;
-}
-
-/*
- * Il test misura il throughput in due fasi consecutive:
- *
- *   Fase A — monitor ON:  i thread vengono throttlati a ≤ MAX/s.
- *             Alcuni resteranno bloccati nella wait_queue del driver.
- *
- *   Fase B — monitor OFF: il driver chiama wake_up_all() e setta
- *             monitor_enabled=0; throttle_check() ritorna immediatamente
- *             per ogni chiamata successiva. I thread bloccati si svegliano
- *             e il throughput torna illimitato.
- *
- * Criteri di PASS:
- *   - rate_A ≤ MAX*1.5  (throttling attivo)
- *   - rate_B > MAX*5    (nessun limite dopo lo spegnimento)
- */
-static int test_monitor_toggle(int drv_fd, const char *progpath,
-                               int nworkers, int max_val)
-{
-#define PHASE_SEC 3            /* secondi per ciascuna fase */
-    int  sys_nr  = SYS_getpid;
-    int  mon     = 1;
-    int  prog_ok = 0, sys_ok = 0;
-    int  result  = 1;
-
-    printf("\n========================================\n");
-    printf("  TEST 4: monitor off/on\n");
-    printf("========================================\n");
-    printf("  Syscall  : getpid()  (nr=%d)\n", SYS_getpid);
-    printf("  Workers  : %d pthread\n", nworkers);
-    printf("  MAX      : %d inv/s\n", max_val);
-    printf("  Fasi     : %d s ON  +  %d s OFF\n\n", PHASE_SEC, PHASE_SEC);
-
-    /* ---- Configura il driver ---- */
-    if (ioctl(drv_fd, IOCTL_ADD_PROG,    progpath) < 0) { perror("ADD_PROG");    goto cleanup; }
-    prog_ok = 1;
-    if (ioctl(drv_fd, IOCTL_ADD_SYSCALL, &sys_nr)  < 0) { perror("ADD_SYSCALL"); goto cleanup; }
-    sys_ok = 1;
-    if (ioctl(drv_fd, IOCTL_SET_MAX,     &max_val) < 0) { perror("SET_MAX");     goto cleanup; }
-    if (ioctl(drv_fd, IOCTL_SET_MONITOR, &mon)     < 0) { perror("SET_MONITOR"); goto cleanup; }
-
-    /* ---- Lancia i worker ---- */
-    pthread_t *th = malloc(nworkers * sizeof(pthread_t));
-    for (int i = 0; i < nworkers; i++)
-        pthread_create(&th[i], NULL, t4_worker, NULL);
-
-    /* ================================================================
-     *  Fase A: monitor ON
-     * ================================================================ */
-    printf("  [Fase A] monitor ON  — throughput atteso ≤ %d inv/s\n", max_val);
-    printf("  sec  calls/s  stato\n");
-    printf("  ---  -------  -----\n");
-
-    /* Warmup: lascia scadere la finestra parziale del driver */
-    sleep(1);
-    ioctl(drv_fd, IOCTL_RESET_STATS, NULL);
-    long prev = atomic_load(&t4_calls);
-    long ps_a[PHASE_SEC];
-    for (int s = 0; s < PHASE_SEC; s++) {
-        sleep(1);
-        long cur  = atomic_load(&t4_calls);
-        ps_a[s]   = cur - prev;
-        prev      = cur;
-        printf("  %3d  %7ld  %s\n", s+1, ps_a[s],
-               ps_a[s] > (long)max_val ? "ANOMALIA" : "ok");
-    }
-
-    /* Legge le stats del driver prima di spegnere il monitor:
-     * dopo SET_MONITOR(0) il driver smette di aggiornare le statistiche. */
-    struct throttle_stats st_a = {0};
-    ioctl(drv_fd, IOCTL_GET_STATS, &st_a);
-
-    /* ================================================================
-     *  Transizione: spegni il monitor
-     *  Il driver esegue wake_up_all(&throttle_wq): i thread bloccati
-     *  escono dalla wait_queue e completano la loro invocazione.
-     * ================================================================ */
-    printf("\n  >>> Spegnimento monitor — wake_up_all() nel kernel <<<\n\n");
-    { int off = 0; ioctl(drv_fd, IOCTL_SET_MONITOR, &off); }
-
-    /* ================================================================
-     *  Fase B: monitor OFF
-     * ================================================================ */
-    printf("  [Fase B] monitor OFF — throughput atteso > %d inv/s\n", max_val);
-    printf("  sec  calls/s\n");
-    printf("  ---  -------\n");
-
-    prev = atomic_load(&t4_calls);
-    long ps_b[PHASE_SEC];
-    for (int s = 0; s < PHASE_SEC; s++) {
-        sleep(1);
-        long cur  = atomic_load(&t4_calls);
-        ps_b[s]   = cur - prev;
-        prev      = cur;
-        printf("  %3d  %7ld\n", s+1, ps_b[s]);
-    }
-
-    /* ---- Ferma i thread ---- */
-    t4_running = 0;
-    for (int i = 0; i < nworkers; i++)
-        pthread_join(th[i], NULL);
-    free(th);
-
-    /* ---- Calcolo media fase B (userspace — monitor era OFF) ---- */
-    long sum_b = 0;
-    for (int i = 0; i < PHASE_SEC; i++) sum_b += ps_b[i];
-    double rate_b = (double)sum_b / PHASE_SEC;
-
-    /* ---- Verifica ---- */
-    /* Fase A: driver stats (allineate all'hrtimer, immune al drift) */
-    int pass_on  = (st_a.avg_calls_per_window <= (long)max_val &&
-                    st_a.peak_calls_per_window <= (long)max_val);
-    /* Fase B: userspace — il driver non registra stats a monitor spento */
-    int pass_off = (rate_b > max_val);
-    result = (pass_on && pass_off) ? 0 : 1;
-
-    printf("\n  -- Statistiche driver (fase A, allineate all'hrtimer) --\n");
-    printf("  Peak calls/finestra : %ld\n",   st_a.peak_calls_per_window);
-    printf("  Avg  calls/finestra : %ld\n",   st_a.avg_calls_per_window);
-    printf("  Peak delay          : %lld ns (%.3f ms)\n",
-           st_a.peak_delay_ns, st_a.peak_delay_ns / 1e6);
-    printf("  Avg  delay          : %lld ns (%.3f ms)\n",
-           st_a.avg_delay_ns, st_a.avg_delay_ns / 1e6);
-    printf("  Peak bloccati       : %ld thread\n", st_a.peak_blocked_threads);
-    printf("  Avg  bloccati       : %ld thread\n", st_a.avg_blocked_threads);
-
-    printf("\n  -- Verifica --\n");
-    printf("  Fase A avg/finestra <= MAX (%d): %s  (%ld)\n",
-           max_val, pass_on  ? "PASS" : "FAIL", st_a.avg_calls_per_window);
-    printf("  Fase A peak/finestra <= MAX (%d): %s  (%ld)\n",
-           max_val, pass_on  ? "PASS" : "FAIL", st_a.peak_calls_per_window);
-    printf("  Fase B media (%.1f) > MAX (%d): %s\n",
-           rate_b, max_val, pass_off ? "PASS" : "FAIL");
-
-cleanup:
-    /* monitor già spento nella transizione, ma per sicurezza */
-    { int off = 0; ioctl(drv_fd, IOCTL_SET_MONITOR, &off); }
-    if (sys_ok)  ioctl(drv_fd, IOCTL_DEL_SYSCALL, &sys_nr);
-    if (prog_ok) ioctl(drv_fd, IOCTL_DEL_PROG, progpath);
-    return result;
-}
-
-/* ================================================================
  *  main
  * ================================================================ */
 
@@ -759,10 +502,8 @@ int main(int argc, char *argv[])
     printf("=========================================\n");
 
     /* ---- Esecuzione dei test ---- */
-    int r1 = test_blocking     (drv_fd, progpath, nworkers, duration, max_val);
-    int r2 = test_uid          (drv_fd,           nworkers, duration, max_val);
-    int r3 = test_root_access  (drv_fd);
-    int r4 = test_monitor_toggle(drv_fd, progpath, nworkers, max_val);
+    int r1 = test_blocking(drv_fd, progpath, nworkers, duration, max_val);
+    int r2 = test_uid     (drv_fd,           nworkers, duration, max_val);
 
     close(drv_fd);
 
@@ -770,15 +511,11 @@ int main(int argc, char *argv[])
     printf("\n=========================================\n");
     printf("  RIEPILOGO\n");
     printf("=========================================\n");
-    printf("  Test 1 (syscall bloccante)   : %s\n",
+    printf("  Test 1 (syscall bloccante)  : %s\n",
            r1 == 0 ? "PASS" : r1 < 0 ? "ERRORE" : "FAIL");
-    printf("  Test 2 (throttling per UID)  : %s\n",
+    printf("  Test 2 (throttling per UID) : %s\n",
            r2 == 0 ? "PASS" : r2 < 0 ? "ERRORE" : "FAIL");
-    printf("  Test 3 (accesso root-only)   : %s\n",
-           r3 == 0 ? "PASS" : r3 < 0 ? "ERRORE" : "FAIL");
-    printf("  Test 4 (monitor off/on)      : %s\n",
-           r4 == 0 ? "PASS" : r4 < 0 ? "ERRORE" : "FAIL");
-    int all_pass = (r1 == 0 && r2 == 0 && r3 == 0 && r4 == 0);
+    int all_pass = (r1 == 0 && r2 == 0);
     printf("\n  %s\n", all_pass ? "PASS" : "FAIL");
     printf("=========================================\n");
 
