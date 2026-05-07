@@ -216,13 +216,16 @@ int main(int argc, char *argv[])
     clock_gettime(CLOCK_MONOTONIC, &ts_end);
     printf("  Fine   : %ld.%09ld s\n", ts_end.tv_sec, ts_end.tv_nsec);
 
+    /* Cattura il totale prima di fermare i thread: dopo IOCTL_SET_MONITOR(0)
+     * i thread bloccati vengono svegliati senza throttling e farebbero
+     * chiamate extra che gonfierebbero il conteggio. */
+    long total = atomic_load(&total_calls) - baseline;
+
     /* ---- Ferma i thread ---- */
     running = 0;
     { int val = 0; ioctl(fd, IOCTL_SET_MONITOR, &val); }
     for (int i = 0; i < num_threads; i++)
         pthread_join(threads[i], NULL);
-
-    long total = atomic_load(&total_calls) - baseline;  /* esclude il warmup */
 
     /* ---- Statistiche dal driver ---- */
     struct throttle_stats stats;
