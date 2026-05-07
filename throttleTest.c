@@ -279,15 +279,15 @@ int main(int argc, char *argv[])
      *  misura introdotto dallo sleep del test (drift tra oscillatori).
      *
      *  Criteri:
-     *   1. Media per-finestra (driver) ≤ MAX * 1.2
+     *   1. Media per-finestra (driver) ≤ MAX
      *   2. Picco per-finestra  (driver) ≤ MAX
      *      (il driver non può superare MAX nella propria finestra;
      *       se lo fa, è un bug nel throttling stesso)
      * ================================================================ */
 
     double avg       = got_stats ? (double)stats.avg_calls_per_window : (double)total / duration;
-    int    pass_avg  = got_stats ? (stats.avg_calls_per_window  <= (long)(max_val * 1.2))
-                                 : (avg <= max_val * 1.2);
+    int    pass_avg  = got_stats ? (stats.avg_calls_per_window  <= (long)max_val)
+                                 : (avg <= max_val );
     int    pass_wins = got_stats ? (stats.peak_calls_per_window <= (long)max_val)
                                  : 1;
 
@@ -314,8 +314,8 @@ int main(int argc, char *argv[])
     }
 
     printf("\n  -- Verifica (basata su statistiche driver) --\n");
-    printf("  Avg/finestra <= MAX*1.2 (%d): %s  (%ld)\n",
-           (int)(max_val * 1.2), pass_avg  ? "PASS" : "FAIL",
+    printf("  Avg/finestra <= MAX(%d): %s  (%ld)\n",
+           (int)(max_val), pass_avg  ? "PASS" : "FAIL",
            got_stats ? stats.avg_calls_per_window : (long)avg);
     printf("  Peak/finestra <= MAX    (%d): %s  (%ld)\n",
            max_val, pass_wins ? "PASS" : "FAIL",

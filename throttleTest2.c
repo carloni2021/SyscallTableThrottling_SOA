@@ -412,46 +412,48 @@ static int test_uid(int drv_fd, int nworkers, int duration, int max_val)
     ioctl(drv_fd, IOCTL_GET_STATS, &st);
 
     /* ---- Verifica ---- */
-    double avg_thr    = (double)total_thr / duration;
     double avg_ctl    = (double)total_ctl / duration;
-    int pass_thr_avg  = (avg_thr <= max_val * 1.2);
-    int pass_thr_wins = 1;
-    for (int i = 0; i < duration; i++)
-        if (ps_thr[i] > (long)(max_val * 1.5)) { pass_thr_wins = 0; break; }
+
+    /* Throttled: usa driver stats (allineate all'hrtimer, immune al drift) */
+    int pass_thr_avg  = (st.avg_calls_per_window  <= (long)max_val);
+    int pass_thr_wins = (st.peak_calls_per_window <= (long)max_val);
 
     /*
-     * Il gruppo di controllo deve essere significativamente più veloce
-     * del gruppo throttled: se il LKM funziona correttamente, il rate del
-     * gruppo control sarà molto superiore a MAX (tipicamente 10×-100× su
-     * hardware moderno). Usiamo MAX*5 come soglia minima conservativa.
+     * Control: il driver non monitora CONTROL_UID, quindi la misura
+     * deve restare userspace. Il rate deve essere significativamente
+     * superiore a MAX per dimostrare che il throttling è selettivo.
      */
     int pass_ctl_free = (avg_ctl > max_val * 5.0);
 
     free(ps_thr);
     free(ps_ctl);
 
-    printf("\n  -- Statistiche driver --\n");
-    printf("  Peak delay      : %lld ns (%.3f ms)\n",
+    printf("\n  -- Statistiche driver (gruppo throttled, allineate all'hrtimer) --\n");
+    printf("  Peak calls/finestra : %ld\n",   st.peak_calls_per_window);
+    printf("  Avg  calls/finestra : %ld\n",   st.avg_calls_per_window);
+    printf("  Peak delay          : %lld ns (%.3f ms)\n",
            st.peak_delay_ns, st.peak_delay_ns / 1e6);
-    printf("  Avg  delay      : %lld ns (%.3f ms)\n",
+    printf("  Avg  delay          : %lld ns (%.3f ms)\n",
            st.avg_delay_ns, st.avg_delay_ns / 1e6);
-    printf("  Peak delay prog : '%s'  uid=%u\n",
+    printf("  Peak delay prog     : '%s'  uid=%u\n",
            st.peak_delay_prog, st.peak_delay_uid);
-    printf("  Peak bloccati   : %ld processi\n", st.peak_blocked_threads);
-    printf("  Avg  bloccati   : %ld processi\n", st.avg_blocked_threads);
+    printf("  Peak bloccati       : %ld processi\n", st.peak_blocked_threads);
+    printf("  Avg  bloccati       : %ld processi\n", st.avg_blocked_threads);
 
     printf("\n  -- Confronto gruppi --\n");
-    printf("  Gruppo throttled (uid=%u): %.1f calls/s\n", TARGET_UID,  avg_thr);
-    printf("  Gruppo control   (uid=%u): %.1f calls/s\n", CONTROL_UID, avg_ctl);
+    printf("  Gruppo throttled (uid=%u): avg %ld calls/s (driver)\n",
+           TARGET_UID, st.avg_calls_per_window);
+    printf("  Gruppo control   (uid=%u): avg %.1f calls/s (userspace)\n",
+           CONTROL_UID, avg_ctl);
     printf("  Rapporto control/throttled: %.1fx\n",
-           avg_thr > 0 ? avg_ctl / avg_thr : 0.0);
+           st.avg_calls_per_window > 0 ? avg_ctl / st.avg_calls_per_window : 0.0);
 
     printf("\n  -- Verifica --\n");
-    printf("  Throttled: media (%.1f) <= MAX*1.2 (%d): %s\n",
-           avg_thr, (int)(max_val * 1.2), pass_thr_avg ? "PASS" : "FAIL");
-    printf("  Throttled: nessuna finestra > MAX*1.5 (%d): %s\n",
-           (int)(max_val * 1.5), pass_thr_wins ? "PASS" : "FAIL");
-    printf("  Control:   media (%.1f) > MAX*5 (%d): %s\n",
+    printf("  Throttled avg/finestra <= MAX (%d): %s  (%ld)\n",
+           max_val, pass_thr_avg  ? "PASS" : "FAIL", st.avg_calls_per_window);
+    printf("  Throttled peak/finestra <= MAX (%d): %s  (%ld)\n",
+           max_val, pass_thr_wins ? "PASS" : "FAIL", st.peak_calls_per_window);
+    printf("  Control media (%.1f) > MAX*5 (%d): %s\n",
            avg_ctl, max_val * 5, pass_ctl_free ? "PASS" : "FAIL");
 
     result = (pass_thr_avg && pass_thr_wins && pass_ctl_free) ? 0 : 1;
@@ -624,6 +626,7 @@ static int test_monitor_toggle(int drv_fd, const char *progpath,
 
     /* Warmup: lascia scadere la finestra parziale del driver */
     sleep(1);
+    ioctl(drv_fd, IOCTL_RESET_STATS, NULL);
     long prev = atomic_load(&t4_calls);
     long ps_a[PHASE_SEC];
     for (int s = 0; s < PHASE_SEC; s++) {
@@ -634,7 +637,11 @@ static int test_monitor_toggle(int drv_fd, const char *progpath,
         printf("  %3d  %7ld  %s\n", s+1, ps_a[s],
                ps_a[s] > (long)max_val ? "ANOMALIA" : "ok");
     }
-    long snap_a = atomic_load(&t4_calls);
+
+    /* Legge le stats del driver prima di spegnere il monitor:
+     * dopo SET_MONITOR(0) il driver smette di aggiornare le statistiche. */
+    struct throttle_stats st_a = {0};
+    ioctl(drv_fd, IOCTL_GET_STATS, &st_a);
 
     /* ================================================================
      *  Transizione: spegni il monitor
@@ -667,34 +674,35 @@ static int test_monitor_toggle(int drv_fd, const char *progpath,
         pthread_join(th[i], NULL);
     free(th);
 
-    /* ---- Calcolo medie sui campioni per-secondo ---- */
-    long sum_a = 0, sum_b = 0;
-    for (int i = 0; i < PHASE_SEC; i++) { sum_a += ps_a[i]; sum_b += ps_b[i]; }
-    double rate_a = (double)sum_a / PHASE_SEC;
+    /* ---- Calcolo media fase B (userspace — monitor era OFF) ---- */
+    long sum_b = 0;
+    for (int i = 0; i < PHASE_SEC; i++) sum_b += ps_b[i];
     double rate_b = (double)sum_b / PHASE_SEC;
-    (void)snap_a;   /* snap_a usato solo per il confronto logico */
-
-    /* ---- Statistiche driver ---- */
-    struct throttle_stats st = {0};
-    ioctl(drv_fd, IOCTL_GET_STATS, &st);
 
     /* ---- Verifica ---- */
-    int pass_on  = (rate_a <= max_val);
-    int pass_off = (rate_b >  max_val);
+    /* Fase A: driver stats (allineate all'hrtimer, immune al drift) */
+    int pass_on  = (st_a.avg_calls_per_window <= (long)max_val &&
+                    st_a.peak_calls_per_window <= (long)max_val);
+    /* Fase B: userspace — il driver non registra stats a monitor spento */
+    int pass_off = (rate_b > max_val);
     result = (pass_on && pass_off) ? 0 : 1;
 
-    printf("\n  -- Statistiche driver (fase A) --\n");
-    printf("  Peak delay    : %lld ns (%.3f ms)\n",
-           st.peak_delay_ns, st.peak_delay_ns / 1e6);
-    printf("  Avg  delay    : %lld ns (%.3f ms)\n",
-           st.avg_delay_ns, st.avg_delay_ns / 1e6);
-    printf("  Peak bloccati : %ld thread\n", st.peak_blocked_threads);
-    printf("  Avg  bloccati : %ld thread\n", st.avg_blocked_threads);
+    printf("\n  -- Statistiche driver (fase A, allineate all'hrtimer) --\n");
+    printf("  Peak calls/finestra : %ld\n",   st_a.peak_calls_per_window);
+    printf("  Avg  calls/finestra : %ld\n",   st_a.avg_calls_per_window);
+    printf("  Peak delay          : %lld ns (%.3f ms)\n",
+           st_a.peak_delay_ns, st_a.peak_delay_ns / 1e6);
+    printf("  Avg  delay          : %lld ns (%.3f ms)\n",
+           st_a.avg_delay_ns, st_a.avg_delay_ns / 1e6);
+    printf("  Peak bloccati       : %ld thread\n", st_a.peak_blocked_threads);
+    printf("  Avg  bloccati       : %ld thread\n", st_a.avg_blocked_threads);
 
     printf("\n  -- Verifica --\n");
-    printf("  Fase A: media (%.1f) <= MAX (%d): %s\n",
-           rate_a, max_val, pass_on  ? "PASS" : "FAIL");
-    printf("  Fase B: media (%.1f) >  MAX (%d): %s\n",
+    printf("  Fase A avg/finestra <= MAX (%d): %s  (%ld)\n",
+           max_val, pass_on  ? "PASS" : "FAIL", st_a.avg_calls_per_window);
+    printf("  Fase A peak/finestra <= MAX (%d): %s  (%ld)\n",
+           max_val, pass_on  ? "PASS" : "FAIL", st_a.peak_calls_per_window);
+    printf("  Fase B media (%.1f) > MAX (%d): %s\n",
            rate_b, max_val, pass_off ? "PASS" : "FAIL");
 
 cleanup:
