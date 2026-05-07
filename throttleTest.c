@@ -50,6 +50,9 @@ struct throttle_stats {
     unsigned int peak_delay_uid;
     long         avg_blocked_threads;
     long         peak_blocked_threads;
+    // Aggiunta per il test: media calls/finestra (allineata all'hrtimer del driver)
+    long         avg_calls_per_window;
+    long         peak_calls_per_window;
 };
 
 #define IOCTL_ADD_PROG    _IOW('T',  1, char[PROG_PATH_MAX])
