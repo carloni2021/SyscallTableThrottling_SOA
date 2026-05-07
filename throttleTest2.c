@@ -73,6 +73,8 @@ struct throttle_stats {
     unsigned int peak_delay_uid;
     long         avg_blocked_threads;
     long         peak_blocked_threads;
+    long         peak_calls_per_window;
+    long         avg_calls_per_window;
 };
 
 #define IOCTL_ADD_PROG    _IOW('T',  1, char[PROG_PATH_MAX])
@@ -159,30 +161,24 @@ static int test_blocking(int drv_fd, const char *progpath,
     if (ioctl(drv_fd, IOCTL_SET_MONITOR, &mon_val) < 0) { perror("SET_MONITOR"); goto cleanup; }
 
     /* ---- Lancia i worker ---- */
-    pthread_t *th     = malloc(nworkers * sizeof(pthread_t));
-    long      *ps     = malloc(duration * sizeof(long));
-    long       prev   = 0;
+    pthread_t *th = malloc(nworkers * sizeof(pthread_t));
 
     for (int i = 0; i < nworkers; i++)
         pthread_create(&th[i], NULL, t1_worker, NULL);
 
     /* Warmup: lascia scadere la finestra parziale del driver (vedi throttleTest.c) */
     sleep(1);
+    /* Reset statistiche dopo il warmup: le finestre successive vengono
+     * misurate dal driver, allineate ai propri boundary. */
+    ioctl(drv_fd, IOCTL_RESET_STATS, NULL);
     long t1_baseline = atomic_load(&t1_calls);
-    prev = t1_baseline;
 
-    /* ---- Misurazione throughput ---- */
-    printf("  sec  calls/s  stato\n");
-    printf("  ---  -------  -----\n");
-    for (int s = 0; s < duration; s++) {
-        sleep(1);
-        long cur  = atomic_load(&t1_calls);
-        long rate = cur - prev;
-        ps[s] = rate;
-        prev  = cur;
-        printf("  %3d  %7ld  %s\n", s+1, rate,
-               rate > (long)(max_val * 1.5) ? "ANOMALIA" : "ok");
-    }
+    sleep(duration);
+
+    /* Cattura il totale prima di fermare i thread: dopo IOCTL_SET_MONITOR(0)
+     * i thread bloccati vengono svegliati senza throttling e farebbero
+     * chiamate extra che gonfierebbero il conteggio. */
+    long total = atomic_load(&t1_calls) - t1_baseline;
 
     /* ---- Ferma i thread ---- */
     t1_running = 0;
@@ -190,34 +186,32 @@ static int test_blocking(int drv_fd, const char *progpath,
     for (int i = 0; i < nworkers; i++)
         pthread_join(th[i], NULL);
     free(th);
-    long total = atomic_load(&t1_calls) - t1_baseline;  /* esclude il warmup */
 
     /* ---- Statistiche driver ---- */
     struct throttle_stats st = {0};
     ioctl(drv_fd, IOCTL_GET_STATS, &st);
 
-    /* ---- Verifica ---- */
-    double avg    = (double)total / duration;
-    int pass_avg  = (avg <= max_val * 1.2);
-    int pass_wins = 1;
-    for (int i = 0; i < duration; i++)
-        if (ps[i] > (long)(max_val * 1.5)) { pass_wins = 0; break; }
-    free(ps);
+    /* ---- Verifica basata su statistiche driver (allineate all'hrtimer) ---- */
+    int pass_avg  = (st.avg_calls_per_window  <= (long)(max_val * 1.2));
+    int pass_wins = (st.peak_calls_per_window <= (long)max_val);
     result = (pass_avg && pass_wins) ? 0 : 1;
 
-    printf("\n  -- Statistiche driver --\n");
-    printf("  Peak delay      : %lld ns (%.3f ms)\n",
+    printf("\n  -- Statistiche driver (per-finestra, allineate all'hrtimer) --\n");
+    printf("  Peak calls/finestra : %ld\n",   st.peak_calls_per_window);
+    printf("  Avg  calls/finestra : %ld\n",   st.avg_calls_per_window);
+    printf("  Totale chiamate     : %ld in %d s\n", total, duration);
+    printf("  Peak delay          : %lld ns (%.3f ms)\n",
            st.peak_delay_ns, st.peak_delay_ns / 1e6);
-    printf("  Peak delay prog : '%s'  uid=%u\n",
+    printf("  Peak delay prog     : '%s'  uid=%u\n",
            st.peak_delay_prog, st.peak_delay_uid);
-    printf("  Peak bloccati   : %ld thread\n", st.peak_blocked_threads);
-    printf("  Avg  bloccati   : %ld thread\n", st.avg_blocked_threads);
+    printf("  Peak bloccati       : %ld thread\n", st.peak_blocked_threads);
+    printf("  Avg  bloccati       : %ld thread\n", st.avg_blocked_threads);
 
-    printf("\n  -- Verifica --\n");
-    printf("  Media (%.1f) <= MAX*1.2 (%d): %s\n",
-           avg, (int)(max_val * 1.2), pass_avg ? "PASS" : "FAIL");
-    printf("  Nessuna finestra > MAX*1.5 (%d): %s\n",
-           (int)(max_val * 1.5), pass_wins ? "PASS" : "FAIL");
+    printf("\n  -- Verifica (basata su statistiche driver) --\n");
+    printf("  Avg/finestra <= MAX*1.2 (%d): %s  (%ld)\n",
+           (int)(max_val * 1.2), pass_avg  ? "PASS" : "FAIL", st.avg_calls_per_window);
+    printf("  Peak/finestra <= MAX    (%d): %s  (%ld)\n",
+           max_val, pass_wins ? "PASS" : "FAIL", st.peak_calls_per_window);
 
 cleanup:
     { int off = 0; ioctl(drv_fd, IOCTL_SET_MONITOR, &off); }
@@ -363,6 +357,7 @@ static int test_uid(int drv_fd, int nworkers, int duration, int max_val)
 
     /* Warmup: lascia scadere la finestra parziale del driver */
     sleep(1);
+    ioctl(drv_fd, IOCTL_RESET_STATS, NULL);
 
     /* ---- Misurazione throughput ---- */
     long base_thr = atomic_load(&sh->throttled_calls);  /* baseline post-warmup */
@@ -386,6 +381,12 @@ static int test_uid(int drv_fd, int nworkers, int duration, int max_val)
                ps_thr[s] > (long)(max_val * 1.5) ? "ANOMALIA" : "ok");
     }
 
+    /* Cattura i totali prima di fermare i processi: dopo IOCTL_SET_MONITOR(0)
+     * i processi throttled bloccati vengono svegliati senza throttling e
+     * farebbero chiamate extra che gonfierebbero total_thr. */
+    long total_thr = atomic_load(&sh->throttled_calls) - base_thr;
+    long total_ctl = atomic_load(&sh->control_calls)   - base_ctl;
+
     /* ---- Ferma i processi figlio ----
      *
      * Ordine deliberato:
@@ -400,10 +401,6 @@ static int test_uid(int drv_fd, int nworkers, int duration, int max_val)
     for (int i = 0; i < n_throttled + n_control; i++)
         if (pids[i] > 0) waitpid(pids[i], NULL, 0);
     free(pids);
-
-    /* esclude il warmup dai totali */
-    long total_thr = atomic_load(&sh->throttled_calls) - base_thr;
-    long total_ctl = atomic_load(&sh->control_calls)   - base_ctl;
 
     /* ---- Statistiche driver ---- */
     struct throttle_stats st = {0};
@@ -614,8 +611,7 @@ static int test_monitor_toggle(int drv_fd, const char *progpath,
     /* ================================================================
      *  Fase A: monitor ON
      * ================================================================ */
-    printf("  [Fase A] monitor ON  — throughput atteso ≤ %d inv/s\n",
-           (int)(max_val * 1.5));
+    printf("  [Fase A] monitor ON  — throughput atteso ≤ %d inv/s\n", max_val);
     printf("  sec  calls/s  stato\n");
     printf("  ---  -------  -----\n");
 
@@ -629,7 +625,7 @@ static int test_monitor_toggle(int drv_fd, const char *progpath,
         ps_a[s]   = cur - prev;
         prev      = cur;
         printf("  %3d  %7ld  %s\n", s+1, ps_a[s],
-               ps_a[s] > (long)(max_val * 1.5) ? "ANOMALIA" : "ok");
+               ps_a[s] > (long)max_val ? "ANOMALIA" : "ok");
     }
     long snap_a = atomic_load(&t4_calls);
 
@@ -644,8 +640,7 @@ static int test_monitor_toggle(int drv_fd, const char *progpath,
     /* ================================================================
      *  Fase B: monitor OFF
      * ================================================================ */
-    printf("  [Fase B] monitor OFF — throughput atteso > %d inv/s\n",
-           max_val * 5);
+    printf("  [Fase B] monitor OFF — throughput atteso > %d inv/s\n", max_val);
     printf("  sec  calls/s\n");
     printf("  ---  -------\n");
 
@@ -677,8 +672,8 @@ static int test_monitor_toggle(int drv_fd, const char *progpath,
     ioctl(drv_fd, IOCTL_GET_STATS, &st);
 
     /* ---- Verifica ---- */
-    int pass_on  = (rate_a <= max_val * 1.5);
-    int pass_off = (rate_b >  max_val * 5.0);
+    int pass_on  = (rate_a <= max_val);
+    int pass_off = (rate_b >  max_val);
     result = (pass_on && pass_off) ? 0 : 1;
 
     printf("\n  -- Statistiche driver (fase A) --\n");
@@ -688,10 +683,10 @@ static int test_monitor_toggle(int drv_fd, const char *progpath,
     printf("  Avg  bloccati : %ld thread\n", st.avg_blocked_threads);
 
     printf("\n  -- Verifica --\n");
-    printf("  Fase A: media (%.1f) <= MAX*1.5 (%d): %s\n",
-           rate_a, (int)(max_val * 1.5), pass_on  ? "PASS" : "FAIL");
-    printf("  Fase B: media (%.1f) >  MAX*5   (%d): %s\n",
-           rate_b, max_val * 5,           pass_off ? "PASS" : "FAIL");
+    printf("  Fase A: media (%.1f) <= MAX (%d): %s\n",
+           rate_a, max_val, pass_on  ? "PASS" : "FAIL");
+    printf("  Fase B: media (%.1f) >  MAX (%d): %s\n",
+           rate_b, max_val, pass_off ? "PASS" : "FAIL");
 
 cleanup:
     /* monitor già spento nella transizione, ma per sicurezza */
