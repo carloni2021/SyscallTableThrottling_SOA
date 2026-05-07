@@ -231,7 +231,9 @@ void throttle_check(int nr)
     exit_time = ktime_get();
     delay_ns  = ktime_to_ns(ktime_sub(exit_time, enter_time));
 
-    //aggiornamento delle statistiche sotto lock come al solito
+    /* Scelta di design: è contare nel tempo di ritardo anche il ritardo
+     * dei thread in attesa che non sono stati eseguiti nel lasso di
+     * tempo in esaminazione. */
     spin_lock_irqsave(&stats_lock, flags);
     if (delay_ns > peak_delay_ns) {
         peak_delay_ns  = delay_ns;

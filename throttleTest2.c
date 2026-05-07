@@ -177,11 +177,6 @@ static int test_blocking(int drv_fd, const char *progpath,
 
     sleep(duration);
 
-    /* Cattura il totale prima di fermare i thread: dopo IOCTL_SET_MONITOR(0)
-     * i thread bloccati vengono svegliati senza throttling e farebbero
-     * chiamate extra che gonfierebbero il conteggio. */
-    long total = atomic_load(&t1_calls) - t1_baseline;
-
     /* ---- Ferma i thread ---- */
     t1_running = 0;
     { int off = 0; ioctl(drv_fd, IOCTL_SET_MONITOR, &off); }
@@ -386,11 +381,11 @@ static int test_uid(int drv_fd, int nworkers, int duration, int max_val)
                ps_thr[s] > (long)(max_val * 1.5) ? "ANOMALIA" : "ok");
     }
 
-    /* Cattura i totali prima di fermare i processi: dopo IOCTL_SET_MONITOR(0)
-     * i processi throttled bloccati vengono svegliati senza throttling e
-     * farebbero chiamate extra che gonfierebbero total_thr. */
-    long total_thr = atomic_load(&sh->throttled_calls) - base_thr;
-    long total_ctl = atomic_load(&sh->control_calls)   - base_ctl;
+    /* Cattura il totale del gruppo control prima di fermare i processi:
+     * dopo IOCTL_SET_MONITOR(0) i processi throttled bloccati si svegliano
+     * senza limiti e gonfierebbero il conteggio. Il gruppo control non è
+     * soggetto a throttling quindi il suo contatore è già affidabile. */
+    long total_ctl = atomic_load(&sh->control_calls) - base_ctl;
 
     /* ---- Ferma i processi figlio ----
      *
