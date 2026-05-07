@@ -204,26 +204,17 @@ int main(int argc, char *argv[])
      * boundary di finestra. */
     ioctl(fd, IOCTL_RESET_STATS, NULL);
 
-    /* ---- Misura il throughput ogni secondo ---- */
-    long *per_sec = malloc(duration * sizeof(long));
-    long  baseline = atomic_load(&total_calls);  /* baseline post-warmup */
-    long  prev     = baseline;
+    /* ---- Esecuzione del test ---- */
+    long baseline = atomic_load(&total_calls);  /* baseline post-warmup */
 
-    printf("  sec  calls/s  stato\n");
-    printf("  ---  -------  -----\n");
+    struct timespec ts_start, ts_end;
+    clock_gettime(CLOCK_MONOTONIC, &ts_start);
+    printf("  Inizio : %ld.%09ld s\n", ts_start.tv_sec, ts_start.tv_nsec);
 
-    for (int sec = 0; sec < duration; sec++) {
-        sleep(1);
-        long cur  = atomic_load(&total_calls);
-        long rate = cur - prev;
-        per_sec[sec] = rate;
-        prev = cur;
+    sleep(duration);
 
-        /* Tolleranza del 50%: copre il jitter di scheduling tra il boundary
-         * dell'hrtimer e quello dello sleep del test (~ms). */
-        const char *stato = (rate > (long)(max_val * 1.5)) ? "ANOMALIA" : "ok";
-        printf("  %3d  %7ld  %s\n", sec + 1, rate, stato);
-    }
+    clock_gettime(CLOCK_MONOTONIC, &ts_end);
+    printf("  Fine   : %ld.%09ld s\n", ts_end.tv_sec, ts_end.tv_nsec);
 
     /* ---- Ferma i thread ---- */
     running = 0;
@@ -246,16 +237,13 @@ int main(int argc, char *argv[])
      *
      *  La verifica usa le statistiche per-finestra del driver, che sono
      *  allineate ai boundary dell'hrtimer e quindi prive dell'errore di
-     *  misura introdotto dallo sleep(1) del test (drift tra oscillatori).
+     *  misura introdotto dallo sleep del test (drift tra oscillatori).
      *
      *  Criteri:
      *   1. Media per-finestra (driver) ≤ MAX * 1.2
      *   2. Picco per-finestra  (driver) ≤ MAX
      *      (il driver non può superare MAX nella propria finestra;
      *       se lo fa, è un bug nel throttling stesso)
-     *
-     *  Il display per-secondo qui sotto rimane a scopo informativo/visivo
-     *  ma non influenza il risultato PASS/FAIL.
      * ================================================================ */
 
     double avg       = got_stats ? (double)stats.avg_calls_per_window : (double)total / duration;
@@ -298,6 +286,5 @@ int main(int argc, char *argv[])
 
     free(threads);
     free(args);
-    free(per_sec);
     return pass ? 0 : 1;
 }

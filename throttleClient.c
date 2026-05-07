@@ -12,7 +12,7 @@
  *   sudo ./throttle_ctl set_max   <N>
  *        ./throttle_ctl status
  *        ./throttle_ctl stats
- *        ./throttle_ctl list
+ *        ./throttle_ctl reset_stats
  */
 
 #include <stdio.h>
@@ -25,9 +25,6 @@
 
 #define TASK_COMM_LEN    16
 #define PROG_PATH_MAX    256
-#define MAX_REG_PROGS    32
-#define MAX_REG_UIDS     32
-#define MAX_HOOKED_SYSCALLS 32
 #define DEVICE_PATH      "/dev/throttleDriver"
 
 /* Devono coincidere con throttleDriver.c */
@@ -38,32 +35,16 @@ struct throttle_stats {
     unsigned int peak_delay_uid;
     long         avg_blocked_threads;
     long         peak_blocked_threads;
-};
-
-struct throttle_prog_list {
-    int  count;
-    char paths[MAX_REG_PROGS][PROG_PATH_MAX];
-};
-
-struct throttle_uid_list {
-    int          count;
-    unsigned int uids[MAX_REG_UIDS];
-};
-
-struct throttle_syscall_list {
-    int count;
-    int nrs[MAX_HOOKED_SYSCALLS];
+    long         peak_calls_per_window;
+    long         avg_calls_per_window;
 };
 
 #define IOCTL_ADD_PROG      _IOW('T',  1, char[PROG_PATH_MAX])
 #define IOCTL_DEL_PROG      _IOW('T',  2, char[PROG_PATH_MAX])
-#define IOCTL_LIST_PROGS    _IOR('T',  3, struct throttle_prog_list)
 #define IOCTL_ADD_UID       _IOW('T',  4, unsigned int)
 #define IOCTL_DEL_UID       _IOW('T',  5, unsigned int)
-#define IOCTL_LIST_UIDS     _IOR('T',  6, struct throttle_uid_list)
 #define IOCTL_ADD_SYSCALL   _IOW('T',  7, int)
 #define IOCTL_DEL_SYSCALL   _IOW('T',  8, int)
-#define IOCTL_LIST_SYSCALLS _IOR('T',  9, struct throttle_syscall_list)
 struct throttle_status {
     int monitor_enabled;
     int max_calls;
@@ -98,10 +79,9 @@ static void usage(void)
         "  throttle_ctl del_sys   <nr>     — deregistra syscall number\n"
         "  throttle_ctl monitor   <0|1>    — off/on il monitor\n"
         "  throttle_ctl set_max   <N>      — imposta MAX inv/sec\n"
-        "  throttle_ctl status             — mostra stato in dmesg\n"
+        "  throttle_ctl status             — mostra stato corrente\n"
         "  throttle_ctl stats              — mostra statistiche\n"
         "  throttle_ctl reset_stats        — azzera le statistiche (solo root)\n"
-        "  throttle_ctl list               — mostra tutte le liste in dmesg\n"
     );
     exit(1);
 }
@@ -161,54 +141,20 @@ int main(int argc, char *argv[])
         ret = ioctl(fd, IOCTL_GET_STATS, &s);
         if (ret == 0) {
             printf("=== Statistiche throttleDriver ===\n");
+            printf("  Peak calls/finestra:  %ld\n",   s.peak_calls_per_window);
+            printf("  Avg  calls/finestra:  %ld\n",   s.avg_calls_per_window);
             printf("  Peak delay:           %lld ns (%.3f ms)\n",
                    s.peak_delay_ns, s.peak_delay_ns / 1e6);
-            printf("  Peak delay prog:      '%s'\n", s.peak_delay_prog);
-            printf("  Peak delay uid:       %u\n", s.peak_delay_uid);
-            printf("  Peak thread bloccati: %ld\n", s.peak_blocked_threads);
-            printf("  Avg  thread bloccati: %ld\n", s.avg_blocked_threads);
+            printf("  Peak delay prog:      '%s'\n",  s.peak_delay_prog);
+            printf("  Peak delay uid:       %u\n",    s.peak_delay_uid);
+            printf("  Peak thread bloccati: %ld\n",   s.peak_blocked_threads);
+            printf("  Avg  thread bloccati: %ld\n",   s.avg_blocked_threads);
         }
 
     } else if (strcmp(cmd, "reset_stats") == 0) {
         ret = ioctl(fd, IOCTL_RESET_STATS, 0);
         if (ret == 0)
             printf("Statistiche azzerate.\n");
-
-    } else if (strcmp(cmd, "list") == 0) {
-        struct throttle_prog_list    pl;
-        struct throttle_uid_list     ul;
-        struct throttle_syscall_list sl;
-        int i;
-
-        if (ioctl(fd, IOCTL_LIST_PROGS, &pl) == 0) {
-            printf("=== Programmi registrati (%d) ===\n", pl.count);
-            if (pl.count == 0)
-                printf("  (vuota)\n");
-            for (i = 0; i < pl.count; i++)
-                printf("  [%d] '%s'\n", i, pl.paths[i]);
-        } else {
-            perror("IOCTL_LIST_PROGS");
-        }
-
-        if (ioctl(fd, IOCTL_LIST_UIDS, &ul) == 0) {
-            printf("=== UID registrati (%d) ===\n", ul.count);
-            if (ul.count == 0)
-                printf("  (vuota)\n");
-            for (i = 0; i < ul.count; i++)
-                printf("  [%d] %u\n", i, ul.uids[i]);
-        } else {
-            perror("IOCTL_LIST_UIDS");
-        }
-
-        if (ioctl(fd, IOCTL_LIST_SYSCALLS, &sl) == 0) {
-            printf("=== Syscall registrate (%d) ===\n", sl.count);
-            if (sl.count == 0)
-                printf("  (vuota)\n");
-            for (i = 0; i < sl.count; i++)
-                printf("  [%d] nr=%d\n", i, sl.nrs[i]);
-        } else {
-            perror("IOCTL_LIST_SYSCALLS");
-        }
 
     } else {
         usage();
