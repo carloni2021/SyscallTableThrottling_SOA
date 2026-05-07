@@ -277,6 +277,7 @@ static long ioctl_handler(struct file *filep,
         //memset per azzerare il nome del programma associato al picco di ritardo
         memset(peak_delay_prog, 0, TASK_COMM_LEN);
         peak_blocked = 0; total_blocked_sum = 0; total_blocked_count = 0;
+        peak_calls_per_window = 0; total_calls_sum_w = 0;
         spin_unlock_irqrestore(&stats_lock, flags);
 
         /* Sveglia al più nr_val thread: coerente con i nuovi slot disponibili */
@@ -290,18 +291,22 @@ static long ioctl_handler(struct file *filep,
         peak_delay_ns = 0; peak_delay_uid = 0;
         memset(peak_delay_prog, 0, TASK_COMM_LEN);
         peak_blocked = 0; total_blocked_sum = 0; total_blocked_count = 0;
+        peak_calls_per_window = 0; total_calls_sum_w = 0;
         spin_unlock_irqrestore(&stats_lock, flags);
         break;
 
     //Stampa le statistiche di ritardo e thread bloccati, con protezione tramite spinlock per garantire coerenza dei dati durante la lettura.
     case IOCTL_GET_STATS:
         spin_lock_irqsave(&stats_lock, flags);
-        stats_out.peak_delay_ns       = peak_delay_ns;
-        stats_out.peak_delay_uid      = peak_delay_uid;
+        stats_out.peak_delay_ns        = peak_delay_ns;
+        stats_out.peak_delay_uid       = peak_delay_uid;
         strscpy(stats_out.peak_delay_prog, peak_delay_prog, TASK_COMM_LEN);
         stats_out.peak_blocked_threads = peak_blocked;
         stats_out.avg_blocked_threads  = (total_blocked_count > 0)
             ? (total_blocked_sum / total_blocked_count) : 0;
+        stats_out.peak_calls_per_window = peak_calls_per_window;
+        stats_out.avg_calls_per_window  = (total_blocked_count > 0)
+            ? (long)(total_calls_sum_w / total_blocked_count) : 0;
         spin_unlock_irqrestore(&stats_lock, flags);
         // Copia sicura delle statistiche dallo spazio kernel a quello utente
         if (copy_to_user((struct throttle_stats __user *)arg, &stats_out, sizeof(stats_out)))

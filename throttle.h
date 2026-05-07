@@ -79,6 +79,8 @@ struct throttle_stats {
     uid_t     peak_delay_uid;
     long      avg_blocked_threads;
     long      peak_blocked_threads;
+    long      peak_calls_per_window;
+    long      avg_calls_per_window;
 };
 #define IOCTL_GET_STATS     _IOR('T', 13, struct throttle_stats)
 #define IOCTL_RESET_STATS   _IO ('T', 14)
@@ -156,6 +158,8 @@ extern atomic_t   current_blocked;
 extern long       peak_blocked;
 extern long long  total_blocked_sum;
 extern long       total_blocked_count;
+extern long       peak_calls_per_window;
+extern long long  total_calls_sum_w;
 extern spinlock_t stats_lock;
 
 /* Drain protocol: usati da throttle_hook.c e throttle_main.c */

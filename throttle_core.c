@@ -27,6 +27,8 @@ atomic_t   current_blocked                  = ATOMIC_INIT(0);
 long       peak_blocked                     = 0;
 long long  total_blocked_sum                = 0;
 long       total_blocked_count              = 0;
+long       peak_calls_per_window            = 0;
+long long  total_calls_sum_w                = 0;
 //  LOCKS
 DEFINE_SPINLOCK(stats_lock);
 
@@ -112,7 +114,9 @@ static enum hrtimer_restart window_timer_fn(struct hrtimer *timer)
 
     //read once usati più volte all'interno del codice per garantire visibilità sui dati condivisi
     unsigned long flags;
-    atomic_set(&call_count, 0);
+    /* atomic_xchg azzera call_count e restituisce il valore della finestra appena chiusa,
+     * che viene usato per aggiornare le statistiche per-finestra. */
+    long window_calls = atomic_xchg(&call_count, 0);
     if (READ_ONCE(monitor_enabled)) {
         //spin lock per aggiornare le statistiche
         spin_lock_irqsave(&stats_lock, flags);
@@ -121,6 +125,9 @@ static enum hrtimer_restart window_timer_fn(struct hrtimer *timer)
             total_blocked_sum   += blocked;
             total_blocked_count += 1;
             if (blocked > peak_blocked) peak_blocked = blocked;
+            total_calls_sum_w += window_calls;
+            if (window_calls > peak_calls_per_window)
+                peak_calls_per_window = window_calls;
         }
         spin_unlock_irqrestore(&stats_lock, flags);
     }

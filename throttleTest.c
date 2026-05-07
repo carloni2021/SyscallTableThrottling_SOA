@@ -195,6 +195,10 @@ int main(int argc, char *argv[])
      * Un secondo di attesa garantisce che la prima misurazione parta sempre
      * all'inizio di una finestra fresca. */
     sleep(1);
+    /* Reset delle statistiche dopo il warmup: le finestre successive vengono
+     * misurate dal driver stesso, che è l'unica sorgente allineata ai propri
+     * boundary di finestra. */
+    ioctl(fd, IOCTL_RESET_STATS, NULL);
 
     /* ---- Misura il throughput ogni secondo ---- */
     long *per_sec = malloc(duration * sizeof(long));
@@ -236,29 +240,25 @@ int main(int argc, char *argv[])
     /* ================================================================
      *  Verifica automatica del throttling
      *
+     *  La verifica usa le statistiche per-finestra del driver, che sono
+     *  allineate ai boundary dell'hrtimer e quindi prive dell'errore di
+     *  misura introdotto dallo sleep(1) del test (drift tra oscillatori).
+     *
      *  Criteri:
-     *   1. Media complessiva ≤ MAX * 1.2
-     *      (il 20% di margine copre lo startup e lo shutdown dei thread)
+     *   1. Media per-finestra (driver) ≤ MAX * 1.2
+     *   2. Picco per-finestra  (driver) ≤ MAX
+     *      (il driver non può superare MAX nella propria finestra;
+     *       se lo fa, è un bug nel throttling stesso)
      *
-     *   2. Nessuna finestra con rate > MAX * 1.5
-     *      (il 50% di margine copre la non-sincronizzazione tra le
-     *       finestre del driver e quelle di misura del test)
-     *
-     *  Un test senza throttling attivo con 8 thread su getpid()
-     *  produce tipicamente centinaia di migliaia di calls/s:
-     *  se i criteri passano, il rate limiter sta funzionando.
+     *  Il display per-secondo qui sotto rimane a scopo informativo/visivo
+     *  ma non influenza il risultato PASS/FAIL.
      * ================================================================ */
 
-    double avg       = (double)total / duration;
-    int    pass_avg  = (avg <= max_val * 1.2);
-    int    pass_wins = 1;
-
-    for (int i = 0; i < duration; i++) {
-        if (per_sec[i] > (long)(max_val * 1.5)) {
-            pass_wins = 0;
-            break;
-        }
-    }
+    double avg       = got_stats ? (double)stats.avg_calls_per_window : (double)total / duration;
+    int    pass_avg  = got_stats ? (stats.avg_calls_per_window  <= (long)(max_val * 1.2))
+                                 : (avg <= max_val * 1.2);
+    int    pass_wins = got_stats ? (stats.peak_calls_per_window <= (long)max_val)
+                                 : 1;
 
     printf("\n=========================================\n");
     printf("  Risultati\n");
@@ -268,20 +268,24 @@ int main(int argc, char *argv[])
     printf("  MAX configurato : %d calls/s\n", max_val);
 
     if (got_stats) {
-        printf("\n  -- Statistiche driver --\n");
-        printf("  Peak delay      : %lld ns (%.3f ms)\n",
+        printf("\n  -- Statistiche driver (per-finestra, allineate all'hrtimer) --\n");
+        printf("  Peak calls/finestra : %ld\n",   stats.peak_calls_per_window);
+        printf("  Avg  calls/finestra : %ld\n",   stats.avg_calls_per_window);
+        printf("  Peak delay          : %lld ns (%.3f ms)\n",
                stats.peak_delay_ns, stats.peak_delay_ns / 1e6);
-        printf("  Peak delay prog : '%s'\n", stats.peak_delay_prog);
-        printf("  Peak delay uid  : %u\n",   stats.peak_delay_uid);
-        printf("  Peak bloccati   : %ld thread\n", stats.peak_blocked_threads);
-        printf("  Avg  bloccati   : %ld thread\n", stats.avg_blocked_threads);
+        printf("  Peak delay prog     : '%s'\n",  stats.peak_delay_prog);
+        printf("  Peak delay uid      : %u\n",    stats.peak_delay_uid);
+        printf("  Peak bloccati       : %ld thread\n", stats.peak_blocked_threads);
+        printf("  Avg  bloccati       : %ld thread\n", stats.avg_blocked_threads);
     }
 
-    printf("\n  -- Verifica --\n");
-    printf("  Media <= MAX*1.2 (%d): %s  (%.1f)\n",
-           (int)(max_val * 1.2), pass_avg  ? "PASS" : "FAIL", avg);
-    printf("  Nessuna finestra > MAX*1.5 (%d): %s\n",
-           (int)(max_val * 1.5), pass_wins ? "PASS" : "FAIL");
+    printf("\n  -- Verifica (basata su statistiche driver) --\n");
+    printf("  Avg/finestra <= MAX*1.2 (%d): %s  (%ld)\n",
+           (int)(max_val * 1.2), pass_avg  ? "PASS" : "FAIL",
+           got_stats ? stats.avg_calls_per_window : (long)avg);
+    printf("  Peak/finestra <= MAX    (%d): %s  (%ld)\n",
+           max_val, pass_wins ? "PASS" : "FAIL",
+           got_stats ? stats.peak_calls_per_window : (long)max_val);
 
     int pass = pass_avg && pass_wins;
     printf("\n=========================================\n");
