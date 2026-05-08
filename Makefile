@@ -24,6 +24,7 @@ module:
 	$(MAKE) -C $(KDIR) M=$(PWD) modules
 
 userspace: $(CLIENT) $(TEST) $(TEST2)
+	chmod +x testCSV.sh testON_OFF.sh
 
 $(CLIENT): $(CLIENT).c
 	gcc -Wall -o $@ $<

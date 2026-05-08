@@ -180,7 +180,7 @@ static int test_blocking(int drv_fd, const char *progpath,
     ioctl(drv_fd, IOCTL_GET_STATS, &st);
 
     /* ---- Verifica basata su statistiche driver (allineate all'hrtimer) ---- */
-    int pass_avg  = (st.avg_calls_per_window  <= (long)(max_val * 1.2));
+    int pass_avg  = (st.avg_calls_per_window  <= (long)max_val);
     int pass_wins = (st.peak_calls_per_window <= (long)max_val);
     result = (pass_avg && pass_wins) ? 0 : 1;
 
@@ -199,9 +199,9 @@ static int test_blocking(int drv_fd, const char *progpath,
     printf("  Avg  bloccati       : %ld thread\n", st.avg_blocked_threads);
 
     printf("\n  -- Verifica (basata su statistiche driver) --\n");
-    printf("  Avg/finestra <= MAX*1.2 (%d): %s  (%ld)\n",
-           (int)(max_val * 1.2), pass_avg  ? "PASS" : "FAIL", st.avg_calls_per_window);
-    printf("  Peak/finestra <= MAX    (%d): %s  (%ld)\n",
+    printf("  Avg/finestra <= MAX (%d): %s  (%ld)\n",
+           max_val, pass_avg  ? "PASS" : "FAIL", st.avg_calls_per_window);
+    printf("  Peak/finestra <= MAX (%d): %s  (%ld)\n",
            max_val, pass_wins ? "PASS" : "FAIL", st.peak_calls_per_window);
 
 cleanup:
