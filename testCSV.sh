@@ -89,7 +89,7 @@ for t in "${THREADS[@]}"; do
         esito="${esito:-N/A}"
 
         echo "$t,$m,$avg_calls,$peak_calls,$avg_delay,$peak_delay,$avg_blocc,$peak_blocc,$esito" >> "$OUTPUT"
-        echo "$esito  (avg=$avg_calls  peak_delay=${peak_delay}ns  peak_blocc=$peak_blocc)"
+        echo "(avg=$avg_calls  peak_delay=${peak_delay}ns  peak_blocc=$peak_blocc)"
 
         # Pausa breve per lasciare il modulo in stato pulito tra un run e l'altro
         sleep 1

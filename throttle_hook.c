@@ -126,7 +126,6 @@ void remove_hook(int nr)
             begin_syscall_table_hack();
             sys_call_table_ptr[nr] = hooks[i].orig_fn;
             end_syscall_table_hack();
-            mb();
             hooks[i].active = 0;
             printk(KERN_INFO "<throttle>: [HOOK-] nr=%d ripristinato\n", nr);
             break;

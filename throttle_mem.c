@@ -105,6 +105,7 @@ static inline void write_cr4_forced(unsigned long val)
 //Funzioni per disabilitare e ripristinare la protezione in scrittura (CR0.WP) e CET (CR4.CET se presente) per patchare la sys_call_table
 void begin_syscall_table_hack(void)
 {
+    // Disabilita la preemption
     preempt_disable();
     saved_cr0 = read_cr0();
     saved_cr4 = native_read_cr4();

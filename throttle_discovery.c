@@ -76,6 +76,8 @@ static int sct_validate_page(unsigned long *addr)
     for (i = 0; i < (int)PAGE_SIZE; i += (int)sizeof(void *)) {
         unsigned long new_page = page + i + NI_7 * sizeof(void *);
 
+        /* Ferma la scansione se l'entry NI_7 cadrebbe nella pagina successiva
+         * e quella pagina non è mappata: evita un page fault durante l'accesso. */
         if (((page + PAGE_SIZE) == (new_page & PT_PHYS_MASK)) &&
             sys_vtpmo(new_page) == NO_MAP)
             break;
