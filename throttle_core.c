@@ -83,7 +83,7 @@ static int caller_is_registered(unsigned long ino, dev_t dev, uid_t euid)
     struct prog_node *pnode;
     struct uid_node  *unode;
     if (ino) {
-        // hash_for_each_possible itera solo il bucket della chiave → O(1) atteso.
+        // hash_for_each_possible itera sui nodi corrispondenti al bucket selezionato da ino quindi dovrebbe essere o(1)
         hash_for_each_possible(prog_table, pnode, hnode, ino)
             if (pnode->inode == ino && pnode->device == dev) return 1;
             //Nota: è possibile che due programmi diversi abbiano lo stesso inode/device (es. hard link), ma in quel caso li consideriamo equivalenti ai fini del monitoraggio.
@@ -105,7 +105,7 @@ static int syscall_is_registered(int nr)
  * ================================================================ */
 
 
-/*  Hrtimer supporta sia CLOCK_MONOTONIC che CLOCK_REALTIME, ma usiamo MONOTONIC per evitare problemi di salto temporale.
+/*
 *   La funzione window_timer_fn viene chiamata ogni secondo e azzera call_count, aggiorna le statistiche sui thread bloccati e sveglia throttle_wq per sbloccare
 *   eventuali thread in attesa.
 */
@@ -114,7 +114,7 @@ static enum hrtimer_restart window_timer_fn(struct hrtimer *timer)
     /*Nota che hrtimer è già in un contesto di interrupt, quindi non possiamo fare sleep o operazioni bloccanti. Per questo usiamo spin_lock_irqsave e wake_up_all.
     inoltre hrimter è altamente preciso, quindi non c'è rischio di drift significativo nel timer.*/
 
-    //read once usati più volte all'interno del codice per garantire visibilità sui dati condivisi
+    //read once usati più volte all'interno del codice per garantire lettura in memoria sui dati condivisi
     unsigned long flags;
     /* atomic_xchg azzera call_count e restituisce il valore della finestra appena chiusa,
      * che viene usato per aggiornare le statistiche per-finestra. */
@@ -208,18 +208,12 @@ void throttle_check(int nr)
     {
         int ret;
         while (1) {
-            /* READ_ONCE: necessario perché module_unloading e monitor_enabled sono
-             * scritti con smp_store_release; senza READ_ONCE il compilatore potrebbe
-             * cachare il valore in un registro e non vedere mai l'aggiornamento.
-             * Stesso principio per max_calls: può cambiare via IOCTL_SET_MAX. */
-            /* _exclusive: registra il thread come waiter esclusivo, così
-             * wake_up_nr(max_calls) sveglia esattamente max_calls thread
-             * invece di tutti (thundering herd). */
-            //aspettiamo che call_count torni sotto max_calls o che monitor_enabled venga disabilitato o che il modulo venga segnato come in unloading; in tutti i casi usciamo dal loop e lasciamo proseguire la syscall.
-            ret = wait_event_interruptible_exclusive(throttle_wq,
-                      atomic_read(&call_count) < READ_ONCE(max_calls) ||
-                      !READ_ONCE(monitor_enabled) || READ_ONCE(module_unloading));
+            /* ricorda che READ_ONCE garantisce che il compilatore rilegga ogni variabile dalla memoria ad ogni iterazione, invece di cacharne il valore
+             * in un registro — necessario perché max_calls, monitor_enabled e module_unloading possono cambiare su altri CPU in qualsiasi momento.
+             * _exclusive evita il "thundering herd problem": wake_up_nr(N) sveglia solo N thread invece di tutti, uno per slot disponibile. */
+            ret = wait_event_interruptible_exclusive(throttle_wq,atomic_read(&call_count) < READ_ONCE(max_calls) || !READ_ONCE(monitor_enabled) || READ_ONCE(module_unloading));
             if (ret != 0 || !READ_ONCE(monitor_enabled) || READ_ONCE(module_unloading)) break;
+
             count = atomic_inc_return(&call_count);
             if (count <= READ_ONCE(max_calls)) break;
             atomic_dec(&call_count);

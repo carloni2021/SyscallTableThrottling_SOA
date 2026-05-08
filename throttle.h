@@ -42,7 +42,9 @@
 #define DEVICE_NAME         "throttleDriver"
 #define TASK_COMM_LEN       16
 #define MAX_HOOKED_SYSCALLS 32
+//lunghezza ragionevole (se confrontata con PATH_MAX che è lunga 4096) assunta per evitare overhead eccessivi
 #define PROG_PATH_MAX       256
+//valore di default per max
 #define DEFAULT_MAX         100
 
 /* Valore sentinella ritornato da sys_vtpmo quando un indirizzo non è mappato */
@@ -71,6 +73,7 @@ struct throttle_status {
 #define IOCTL_GET_STATUS    _IOR('T', 11, struct throttle_status)
 #define IOCTL_SET_MAX       _IOW('T', 12, int)
 
+//statistiche di throttle
 struct throttle_stats {
     long long peak_delay_ns;
     long long avg_delay_ns;
@@ -82,28 +85,9 @@ struct throttle_stats {
     long      avg_calls_per_window;
     long long total_calls;
 };
+//ioctl relativi
 #define IOCTL_GET_STATS     _IOR('T', 13, struct throttle_stats)
 #define IOCTL_RESET_STATS   _IO ('T', 14)
-
-#define MAX_REG_PROGS  32
-#define MAX_REG_UIDS   32
-
-struct throttle_prog_list {
-    int  count;
-    char paths[MAX_REG_PROGS][PROG_PATH_MAX];
-};
-struct throttle_uid_list {
-    int          count;
-    unsigned int uids[MAX_REG_UIDS];
-};
-struct throttle_syscall_list {
-    int count;
-    int nrs[MAX_HOOKED_SYSCALLS];
-};
-
-#define IOCTL_LIST_PROGS    _IOR('T',  3, struct throttle_prog_list)
-#define IOCTL_LIST_UIDS     _IOR('T',  6, struct throttle_uid_list)
-#define IOCTL_LIST_SYSCALLS _IOR('T',  9, struct throttle_syscall_list)
 
 /* ================================================================
  *  STRUTTURE DATI INTERNE

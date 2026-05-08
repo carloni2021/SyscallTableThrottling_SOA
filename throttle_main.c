@@ -5,7 +5,7 @@
  * Sequenza di init:
  *   1. Registra il device a caratteri (throttle_dev.c)
  *   2. Trova sys_call_table via page-table walk (throttle_discovery.c)
- *   3. Trova x64_sys_call via kprobe/LSTAR e la patcha (throttle_discovery.c)
+ *   3. Trova x64_sys_call via kprobe e la patcha (throttle_discovery.c)
  *      [solo kernel >= 5.15; non fatale se la ricerca fallisce]
  *   4. Avvia l'hrtimer 1 Hz (throttle_core.c)
  */
@@ -61,7 +61,7 @@ static int __init throttle_init(void)
     }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
-    /* Trova x64_sys_call via LSTAR scan e la patcha con JMP → stub esterno.
+    /* Trova x64_sys_call via kprobe e la patcha con JMP → stub esterno.
      * Necessario su kernel >= 5.15 dove il dispatch usa x64_sys_call()
      * anziché sys_call_table direttamente. */
     if (!find_x64_sys_call()) {
@@ -140,5 +140,5 @@ module_init(throttle_init);
 module_exit(throttle_exit);
 
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("Syscall throttling LKM — hardware-only discovery");
+MODULE_DESCRIPTION("Syscall throttling LKM — CR3 walk + kprobe discovery");
 MODULE_AUTHOR("Luca");

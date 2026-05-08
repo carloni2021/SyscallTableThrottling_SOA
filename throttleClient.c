@@ -13,9 +13,7 @@
  *        ./throttle_ctl status
  *        ./throttle_ctl stats
  *        ./throttle_ctl reset_stats
- *        ./throttle_ctl list_progs
- *        ./throttle_ctl list_uids
- *        ./throttle_ctl list_sys
+ *        ./throttle_ctl list
  */
 
 #include <stdio.h>
@@ -44,32 +42,12 @@ struct throttle_stats {
     long long    total_calls;
 };
 
-#define MAX_REG_PROGS    32
-#define MAX_REG_UIDS     32
-#define MAX_REG_SYSCALLS 32
-
-struct throttle_prog_list {
-    int  count;
-    char paths[MAX_REG_PROGS][PROG_PATH_MAX];
-};
-struct throttle_uid_list {
-    int          count;
-    unsigned int uids[MAX_REG_UIDS];
-};
-struct throttle_syscall_list {
-    int count;
-    int nrs[MAX_REG_SYSCALLS];
-};
-
 #define IOCTL_ADD_PROG      _IOW('T',  1, char[PROG_PATH_MAX])
 #define IOCTL_DEL_PROG      _IOW('T',  2, char[PROG_PATH_MAX])
-#define IOCTL_LIST_PROGS    _IOR('T',  3, struct throttle_prog_list)
 #define IOCTL_ADD_UID       _IOW('T',  4, unsigned int)
 #define IOCTL_DEL_UID       _IOW('T',  5, unsigned int)
-#define IOCTL_LIST_UIDS     _IOR('T',  6, struct throttle_uid_list)
 #define IOCTL_ADD_SYSCALL   _IOW('T',  7, int)
 #define IOCTL_DEL_SYSCALL   _IOW('T',  8, int)
-#define IOCTL_LIST_SYSCALLS _IOR('T',  9, struct throttle_syscall_list)
 struct throttle_status {
     int monitor_enabled;
     int max_calls;
@@ -107,9 +85,7 @@ static void usage(void)
         "  throttle_ctl status             — mostra stato corrente\n"
         "  throttle_ctl stats              — mostra statistiche\n"
         "  throttle_ctl reset_stats        — azzera le statistiche (solo root)\n"
-        "  throttle_ctl list_progs         — elenca programmi registrati\n"
-        "  throttle_ctl list_uids          — elenca UID registrati\n"
-        "  throttle_ctl list_sys           — elenca syscall registrate\n"
+        "  throttle_ctl list               — elenca programmi, UID e syscall registrati\n"
     );
     exit(1);
 }
@@ -187,38 +163,16 @@ int main(int argc, char *argv[])
         if (ret == 0)
             printf("Statistiche azzerate.\n");
 
-    } else if (strcmp(cmd, "list_progs") == 0) {
-        /* Legge la lista dei programmi registrati tramite hashtable kernel-side.
+    } else if (strcmp(cmd, "list") == 0) {
+        /* Legge la lista di programmi, UID e syscall registrati tramite read()
+         * sul device. Il kernel genera il testo dinamicamente senza limiti fissi.
          * Accessibile a tutti (non richiede root). */
-        struct throttle_prog_list pl;
-        ret = ioctl(fd, IOCTL_LIST_PROGS, &pl);
-        if (ret == 0) {
-            printf("Programmi registrati (%d):\n", pl.count);
-            for (int i = 0; i < pl.count; i++)
-                printf("  [%d] %s\n", i, pl.paths[i]);
-        }
-
-    } else if (strcmp(cmd, "list_uids") == 0) {
-        /* Legge la lista degli UID registrati tramite hashtable kernel-side.
-         * Accessibile a tutti (non richiede root). */
-        struct throttle_uid_list ul;
-        ret = ioctl(fd, IOCTL_LIST_UIDS, &ul);
-        if (ret == 0) {
-            printf("UID registrati (%d):\n", ul.count);
-            for (int i = 0; i < ul.count; i++)
-                printf("  [%d] %u\n", i, ul.uids[i]);
-        }
-
-    } else if (strcmp(cmd, "list_sys") == 0) {
-        /* Legge la lista delle syscall registrate tramite bitmap kernel-side.
-         * Accessibile a tutti (non richiede root). */
-        struct throttle_syscall_list sl;
-        ret = ioctl(fd, IOCTL_LIST_SYSCALLS, &sl);
-        if (ret == 0) {
-            printf("Syscall registrate (%d):\n", sl.count);
-            for (int i = 0; i < sl.count; i++)
-                printf("  [%d] nr=%d\n", i, sl.nrs[i]);
-        }
+        char rbuf[4096];
+        ssize_t n;
+        //legge dal fd del device (dev_read) e scrive su stdout finché ci sono dati
+        while ((n = read(fd, rbuf, sizeof(rbuf))) > 0)
+            fwrite(rbuf, 1, (size_t)n, stdout);
+        if (n < 0) { perror("read"); ret = -1; }
 
     } else {
         usage();

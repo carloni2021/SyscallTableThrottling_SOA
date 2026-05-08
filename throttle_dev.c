@@ -3,21 +3,24 @@
  *
  * Espone /dev/throttleDriver come interfaccia di configurazione.
  * Tutti i comandi che modificano lo stato richiedono privilegi root (euid=0).
- * I comandi di sola lettura (LIST_*, GET_*) sono accessibili a tutti.
+ * I comandi di sola lettura (GET_*) sono accessibili a tutti.
  *
  * Comandi IOCTL supportati:
- *   ADD/DEL/LIST PROG    — gestione lista programmi monitorati
- *   ADD/DEL/LIST UID     — gestione lista UID monitorati
- *   ADD/DEL/LIST SYSCALL — gestione lista syscall hookate
+ *   ADD/DEL PROG         — gestione lista programmi monitorati
+ *   ADD/DEL UID          — gestione lista UID monitorati
+ *   ADD/DEL SYSCALL      — gestione lista syscall hookate
  *   SET/GET_MONITOR      — abilita/disabilita il throttling
  *   SET/GET_MAX          — imposta il limite di chiamate per finestra
  *   GET/RESET_STATS      — statistiche di ritardo e thread bloccati
-*/
+ *
+ * read() su /dev/throttleDriver restituisce la lista di programmi, UID e
+ *   syscall registrati in formato testo — accessibile a tutti, nessun IOCTL.
+ */
 
 // Include del core per accesso a strutture e funzioni condivise
 #include "throttle.h"
 
-//Major del device, assegnato dinamicamente rappresenta l'identificativo del driver per operazioni su /dev/throttleDriver 
+//Major del device, assegnato dinamicamente rappresenta l'identificativo del driver per operazioni su /dev/throttleDriver
 static int major;
 // Static perché è usato solo in questo file. Viene assegnato da register_chrdev e usato per creare l'interfaccia device.
 static int dev_open(struct inode *i, struct file *f)    { return 0; }
@@ -46,19 +49,13 @@ static long ioctl_handler(struct file *filep,
     struct uid_node   *unode, *ucursor;
     struct hlist_node *htmp;
     struct throttle_stats        stats_out;
-    struct throttle_prog_list   *plist = NULL;
-    struct throttle_uid_list     ulist;
-    struct throttle_syscall_list slist;
     char         prog_path[PROG_PATH_MAX];
     unsigned int uid_val;
     int          nr_val;
     unsigned long flags;
 
     // Solo i comandi di lettura sono accessibili a tutti, gli altri richiedono privilegi root
-    int read_only = (cmd == IOCTL_LIST_PROGS   ||
-                     cmd == IOCTL_LIST_UIDS     ||
-                     cmd == IOCTL_LIST_SYSCALLS ||
-                     cmd == IOCTL_GET_STATUS    ||
+    int read_only = (cmd == IOCTL_GET_STATUS ||
                      cmd == IOCTL_GET_STATS);
 
     // Controllo dei privilegi: se il comando non è di sola lettura e il chiamante non è root, negare l'accesso
@@ -74,14 +71,17 @@ static long ioctl_handler(struct file *filep,
     //Aggiunta tramite progname
     case IOCTL_ADD_PROG: {
         struct path kpath;
-        // Copia sicura del percorso del programma da spazio utente a kernel
+        // Copia del percorso del programma da spazio utente a kernel
         if (copy_from_user(prog_path, (char __user *)arg, PROG_PATH_MAX))
             return -EFAULT;
+
         // Assicura che la stringa sia null-terminated (buff overflow)
         prog_path[PROG_PATH_MAX - 1] = '\0';
+
         // Risolve il percorso per inode e device
         if (kern_path(prog_path, LOOKUP_FOLLOW, &kpath))
             return -ENOENT;
+
         // Crea un nuovo nodo per il programma e popola i campi
         pnode = kmalloc(sizeof(*pnode), GFP_KERNEL);
         if (!pnode) { path_put(&kpath); return -ENOMEM; }
@@ -89,6 +89,7 @@ static long ioctl_handler(struct file *filep,
         pnode->device = kpath.dentry->d_inode->i_sb->s_dev;
         strscpy(pnode->fpath, prog_path, PROG_PATH_MAX);
         path_put(&kpath);
+
         // Aggiunge il nodo alla hash table dei programmi monitorati, evitando duplicati
         spin_lock_irqsave(&config_lock, flags);
         hash_for_each_possible(prog_table, pcursor, hnode, pnode->inode) {
@@ -127,28 +128,7 @@ static long ioctl_handler(struct file *filep,
         break;
     }
 
-    //elenca progname monitorati
-    case IOCTL_LIST_PROGS: {
-        int bkt;
-        plist = kzalloc(sizeof(*plist), GFP_KERNEL);
-        if (!plist) return -ENOMEM;
-        spin_lock_irqsave(&config_lock, flags);
-        // Itera su tutti i bucket della hash table dei programmi monitorati e copia i percorsi in uscita
-        hash_for_each(prog_table, bkt, pcursor, hnode) {
-            if (plist->count < MAX_REG_PROGS)
-                strscpy(plist->paths[plist->count++], pcursor->fpath, PROG_PATH_MAX);
-        }
-        spin_unlock_irqrestore(&config_lock, flags);
-        // Copia sicura della lista dei programmi monitorati dallo spazio kernel a quello utente
-        if (copy_to_user((struct throttle_prog_list __user *)arg, plist, sizeof(*plist))) {
-            kfree(plist); return -EFAULT;
-        }
-        // Libera la memoria allocata per la lista dei programmi monitorati
-        kfree(plist);
-        break;
-    }
-
-    //SEZZIONE UID
+    //SEZIONE UID
     // Aggiunta tramite UID
     case IOCTL_ADD_UID:
         if (copy_from_user(&uid_val, (unsigned int __user *)arg, sizeof(uid_val)))
@@ -158,6 +138,7 @@ static long ioctl_handler(struct file *filep,
         if (!unode) return -ENOMEM;
         unode->uid = (uid_t)uid_val;
 
+        //Aggiunta del nodo alla hash table (sempre tramite uid come chiave) con controllo di duplicati, sotto lock
         spin_lock_irqsave(&config_lock, flags);
         hash_for_each_possible(uid_table, ucursor, hnode, uid_val) {
             if (ucursor->uid == (uid_t)uid_val) {
@@ -180,19 +161,6 @@ static long ioctl_handler(struct file *filep,
             if (ucursor->uid == (uid_t)uid_val) { hash_del(&ucursor->hnode); kfree(ucursor); }
         spin_unlock_irqrestore(&config_lock, flags);
         break;
-
-    // Elenca UID monitorati
-    case IOCTL_LIST_UIDS: {
-        int bkt;
-        memset(&ulist, 0, sizeof(ulist));
-        spin_lock_irqsave(&config_lock, flags);
-        hash_for_each(uid_table, bkt, ucursor, hnode)
-            if (ulist.count < MAX_REG_UIDS) ulist.uids[ulist.count++] = ucursor->uid;
-        spin_unlock_irqrestore(&config_lock, flags);
-        if (copy_to_user((struct throttle_uid_list __user *)arg, &ulist, sizeof(ulist)))
-            return -EFAULT;
-        break;
-    }
 
     //Aggiunta avviene tramite numero di syscall (nr) e viene gestita con una bitmap per efficienza.
     case IOCTL_ADD_SYSCALL: {
@@ -221,20 +189,6 @@ static long ioctl_handler(struct file *filep,
         spin_unlock_irqrestore(&config_lock, flags);
         remove_hook(nr_val);
         break;
-
-    //Elenco syscall monitorate
-    case IOCTL_LIST_SYSCALLS: {
-        int bit;
-        memset(&slist, 0, sizeof(slist));
-        spin_lock_irqsave(&config_lock, flags);
-        // Itera su tutti i bit della bitmap
-        for_each_set_bit(bit, syscall_bitmap, NR_syscalls)
-            if (slist.count < MAX_HOOKED_SYSCALLS) slist.nrs[slist.count++] = bit;
-        spin_unlock_irqrestore(&config_lock, flags);
-        if (copy_to_user((struct throttle_syscall_list __user *)arg, &slist, sizeof(slist)))
-            return -EFAULT;
-        break;
-    }
 
     //Sezione monitoraggio: abilitazione/disabilitazione e query stato
     case IOCTL_SET_MONITOR:
@@ -322,11 +276,85 @@ static long ioctl_handler(struct file *filep,
     return 0;
 }
 
+/*
+ * dev_read — lettura da /dev/throttleDriver
+ *
+ * Restituisce un testo formattato con lista di programmi, UID e syscall registrati al momento della chiamata.
+ * Il buffer viene allocato dinamicamente. La paginazione gestita tramite *ppos, come per file kernel.
+ *
+ * Due passaggi sotto config_lock:
+ *   1. conta gli elementi per dimensionare il buffer
+ *   2. formatta il testo nel buffer allocato
+ */
+static ssize_t dev_read(struct file *filep, char __user *buf,
+                        size_t count, loff_t *ppos)
+{
+    struct prog_node *pcursor;
+    struct uid_node  *ucursor;
+    unsigned long flags;
+    char *kbuf;
+    size_t limit, len = 0;
+    ssize_t to_copy;
+    int bkt, bit;
+    int prog_cnt = 0, uid_cnt = 0, bit_cnt = 0;
+
+    /* Primo passaggio: conta gli elementi per dimensionare il buffer */
+    spin_lock_irqsave(&config_lock, flags);
+    hash_for_each(prog_table, bkt, pcursor, hnode) prog_cnt++;
+    hash_for_each(uid_table,  bkt, ucursor, hnode) uid_cnt++;
+    for_each_set_bit(bit, syscall_bitmap, NR_syscalls) bit_cnt++;
+    spin_unlock_irqrestore(&config_lock, flags);
+
+    //256 byte di overhead per intestazioni e formattazione, più spazio per ogni elemento (path programma, UID, numero syscall)
+    limit = 256 + (size_t)prog_cnt * (PROG_PATH_MAX + 6) + (size_t)uid_cnt  * 24 + (size_t)bit_cnt  * 12;
+
+    kbuf = kvzalloc(limit, GFP_KERNEL);
+    if (!kbuf)
+        return -ENOMEM;
+
+    /* Secondo passaggio: formatta il testo */
+    spin_lock_irqsave(&config_lock, flags);
+    len += scnprintf(kbuf + len, limit - len,
+                     "=== Programmi registrati (%d) ===\n", prog_cnt);
+    hash_for_each(prog_table, bkt, pcursor, hnode)
+        len += scnprintf(kbuf + len, limit - len, "  %s\n", pcursor->fpath);
+
+    len += scnprintf(kbuf + len, limit - len,
+                     "=== UID registrati (%d) ===\n", uid_cnt);
+    hash_for_each(uid_table, bkt, ucursor, hnode)
+        len += scnprintf(kbuf + len, limit - len, "  %u\n", ucursor->uid);
+
+    len += scnprintf(kbuf + len, limit - len,
+                     "=== Syscall registrate (%d) ===\n", bit_cnt);
+    for_each_set_bit(bit, syscall_bitmap, NR_syscalls)
+        len += scnprintf(kbuf + len, limit - len, "  %d\n", bit);
+    spin_unlock_irqrestore(&config_lock, flags);
+
+    //check per non leggere oltre buffer
+    if (*ppos >= (loff_t)len) {
+        kvfree(kbuf);
+        return 0;
+    }
+
+    //calcola quanti byte restituire
+    to_copy = min((size_t)(len - (size_t)*ppos), count);
+    if (copy_to_user(buf, kbuf + *ppos, to_copy)) {
+        kvfree(kbuf);
+        return -EFAULT;
+    }
+
+    //aggiorna posizione di lettura
+    *ppos += to_copy;
+    kvfree(kbuf);
+    return to_copy;
+}
+
 // Struttura file_operations che definisce le operazioni supportate dal device, inclusa la gestione degli IOCTL.
 static const struct file_operations fops = {
     .owner          = THIS_MODULE,
     .open           = dev_open,
     .release        = dev_release,
+    .read           = dev_read,
     .unlocked_ioctl = ioctl_handler,
 };
 

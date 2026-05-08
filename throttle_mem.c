@@ -27,7 +27,10 @@
 #define PDE_IDX(a)  (((u64)(a) >> 21) & 0x1ff)
 #define PTE_IDX(a)  (((u64)(a) >> 12) & 0x1ff)
 
-// Restituisce il numero di pagina fisica mappata a vaddr, o NO_MAP se non mappata
+/* Legge CR3 (base della page table del processo corrente) in una variabile C.
+ *   "mov %%cr3, %0"  — istruzione x86; %%cr3 è il registro, %0 è l'operando 0
+ *   "=r"(v)          — output: scrivi il risultato in un GPR qualsiasi → v
+ *   volatile         — impedisce al compilatore di eliminare/spostare l'istruzione */
 static inline unsigned long vtpmo_read_cr3(void)
 {
     unsigned long v;
@@ -69,23 +72,30 @@ int sys_vtpmo(unsigned long vaddr)
 static unsigned long saved_cr0;
 static unsigned long saved_cr4;
 
-//Scrittura diretta su CR0 e CR4 usando istruzioni inline per aggirare il CR pinning del kernel
-/*definizione: cr pinning è una tecnica usata dal kernel per impedire modifiche non autorizzate ai registri di controllo CR0
- e CR4, che potrebbe essere usata da rootkit o moduli malintenzionati per bypassare le protezioni del kernel. 
- Il kernel impone restrizioni sulla modifica di questi registri, rendendo difficile disabilitare la protezione in 
- scrittura (CR0.WP) necessaria per patchare la sys_call_table. Usando istruzioni inline dirette, il modulo può modificare 
- temporaneamente questi registri senza essere bloccato dal CR pinning, consentendo l'hook delle syscall anche su kernel 
- moderni con protezioni avanzate.*/
+/* Scrive val in CR0 bypassando il CR pinning del kernel.
+ *
+ * Il kernel espone write_cr0() ma al suo interno controlla che certi bit
+ * non vengano modificati (CR pinning): verrebbe bloccato prima di arrivare
+ * all'istruzione hardware. Usando asm inline si va direttamente sull'hardware.
+ *
+ *   "mov %0, %%cr0"   — scrive il valore di %0 nel registro CR0
+ *   "+r"(val)         — input+output: val viene letto dal compilatore in un GPR
+ *   "+m"(__force_order) — operando memoria fittizio: crea una dipendenza che
+ *                         impedisce al compilatore di riordinare questa istruzione
+ *                         rispetto agli accessi alla SCT (stesso trucco usato da
+ *                         native_write_cr0 nei kernel senza CR pinning)
+ *
+ * CR0  — gestisce protezioni fondamentali: paging (PG), write-protect (WP), ecc.
+ * CR4  — gestisce estensioni: CET (shadow stack / IBT), SMEP, SMAP, ecc. */
 inline void write_cr0_forced(unsigned long val)
 {
     unsigned long __force_order;
     asm volatile("mov %0, %%cr0" : "+r"(val), "+m"(__force_order));
 }
-/*differenza tra cr4 e cr0 : 
-* cr0 è un registro di controllo che gestisce le operazioni di base del processore, come la protezione della memoria, il paging e le interruzioni.
-* cr4 è un registro di controllo che gestisce funzionalità avanzate del processore (gestisce anche la protezione per ROP)
-*/
+
 #ifdef X86_CR4_CET
+/* Identico a write_cr0_forced ma per CR4 — necessario per disabilitare CET
+ * prima di scrivere su memoria eseguibile (x64_sys_call / stub). */
 static inline void write_cr4_forced(unsigned long val)
 {
     unsigned long __force_order;

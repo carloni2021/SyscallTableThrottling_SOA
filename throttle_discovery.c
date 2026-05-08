@@ -3,21 +3,24 @@
  * throttle_discovery.c — Ricerca di sys_call_table e x64_sys_call
  *
  * sys_call_table: scansione del virtual address space [0xffffffff00000000, MAX)
- *   con heuristica su 7 indici noti di sys_ni_syscall.
- *   Basato su usctm.c del Professor Francesco Quaglia.
+ *   con euristica su 7 indici noti di sys_ni_syscall.
+ *   Basato su usctm.c https://github.com/FrancescoQuaglia/Linux-sys_call_table-discoverer del Professor Francesco Quaglia.
  *
- * x64_sys_call (kernel >= 5.15), percorso unico:
- *   LSTAR MSR → entry_SYSCALL_64 → scan do_syscall_64
- *   (il percorso via kprobe è rimosso: causa freeze in kprobes_module_going()
- *    durante delete_module anche dopo unregister_kprobe)
+ * x64_sys_call (kernel >= 5.15): risolto tramite kprobe su "x64_sys_call",
+ *   stesso approccio di Quaglia e F-masci.
  *
  * patch_x64_sys_call: alloca uno stub eseguibile FUORI dal modulo via
- *   module_alloc(), scrive 14 byte di machine code auto-contenuto, poi
- *   installa un JMP rel32 da x64_sys_call → stub.
+ *   module_alloc(), scrive machine code auto-contenuto, poi installa un
+ *   JMP rel32 da x64_sys_call → stub.
  *
- * Stub (14 byte, auto-contenuto, nessun riferimento a dati del modulo):
- *   49 BA [addr 8B]    movabs r10, <sys_call_table_addr>   ; SCT hardcoded
- *   41 FF 24 F2        jmpq   *(%r10, %rsi, 8)            ; sys_call_table[nr](regs)
+ * Stub (auto-contenuto, nessun riferimento a dati del modulo):
+ *   Se CONFIG_RETPOLINE: 19 byte con __x86_indirect_thunk_rax (Spectre v2)
+ *     49 BA [addr 8B]    movabs r10, <sys_call_table_addr>
+ *     49 8B 04 F2        mov    rax, [r10 + rsi*8]
+ *     E9 [4B]            jmp    __x86_indirect_thunk_rax
+ *   Altrimenti: 14 byte direct jmp
+ *     49 BA [addr 8B]    movabs r10, <sys_call_table_addr>
+ *     41 FF 24 F2        jmpq   *(%r10, %rsi, 8)
  *
  * Perché lo stub è esterno al modulo:
  *   Durante module unload la memoria del modulo viene rilasciata dopo module_exit().
@@ -137,24 +140,11 @@ static char x64_jump_inst[5];
 static void *x64_stub = NULL;   /* allocato con module_alloc, fuori dal modulo */
 
 
-//blocco kernel v 6.4+ : execmem_alloc, execmem_free e set_memory_x non sono più esportate, vengono risolte a runtime via kprobe in resolve_stub_fns().
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
-/*
- * execmem_alloc, execmem_free, set_memory_x non sono EXPORT_SYMBOL su >= 6.4:
- * vengono tisolti a runtime via kprobe (register+unregister immediato nessun kprobe resta attivo dopo la risoluzione).
- */
 #include <linux/kprobes.h>
 
-typedef void *(*fn_execmem_alloc_t)(unsigned int type, size_t size);
-typedef void  (*fn_execmem_free_t)(void *ptr);
-typedef int   (*fn_set_memory_x_t)(unsigned long addr, int numpages);
-
-static fn_execmem_alloc_t fn_execmem_alloc;
-static fn_execmem_free_t  fn_execmem_free;
-static fn_set_memory_x_t  fn_set_memory_x;
-
-// Usa kprobe per risolvere l'indirizzo di una funzione non esportata; ritorna 0 se fallisce.
-//Aggira il problema che kallsyms_lookup_name non è EXPORT_SYMBOL su kernel recenti, e che execmem_alloc/free e set_memory_x non sono più esportate su >= 6.4.
+/* Usa kprobe per risolvere l'indirizzo di un simbolo non esportato.
+ * Usata sia per execmem_alloc/free/set_memory_x (>= 6.4) sia per
+ * __x86_indirect_thunk_rax (mitigazione Spectre v2, tutti i kernel). */
 static unsigned long lookup_unexported(const char *name)
 {
     struct kprobe kp = { .symbol_name = name };
@@ -164,6 +154,21 @@ static unsigned long lookup_unexported(const char *name)
     unregister_kprobe(&kp);
     return addr;
 }
+
+//blocco kernel v 6.4+ : execmem_alloc, execmem_free e set_memory_x non sono più esportate, vengono risolte a runtime via kprobe in resolve_stub_fns().
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
+/*
+ * execmem_alloc, execmem_free, set_memory_x non sono EXPORT_SYMBOL su >= 6.4:
+ * vengono risolti a runtime via kprobe (register+unregister immediato,
+ * nessun kprobe resta attivo dopo la risoluzione).
+ */
+typedef void *(*fn_execmem_alloc_t)(unsigned int type, size_t size);
+typedef void  (*fn_execmem_free_t)(void *ptr);
+typedef int   (*fn_set_memory_x_t)(unsigned long addr, int numpages);
+
+static fn_execmem_alloc_t fn_execmem_alloc;
+static fn_execmem_free_t  fn_execmem_free;
+static fn_set_memory_x_t  fn_set_memory_x;
 
 // Risolve gli indirizzi di execmem_alloc, execmem_free e set_memory_x a runtime usando lookup_unexported. Ritorna 0 se fallisce.
 static int resolve_stub_fns(void)
@@ -192,115 +197,17 @@ static int resolve_stub_fns(void)
 #  define stub_set_memory_x(a)  set_memory_x((unsigned long)(a), 1)
 #endif
 
-/* Scansiona func cercando cmp imm in [256,600] poi CALL; ritorna la CALL target. */
-//se sta per attraversare una pagina non mappata, si ferma per evitare kernel panic.
-static unsigned long scan_for_x64_sys_call(unsigned long func)
-{
-    //ATTENZIONE scansione la memoria dentro la funzione entry_SYSCALL_64, che è relativamente piccola (qualche centinaio di byte), quindi 2048 byte sono più che sufficienti per trovare la CALL a do_syscall_64 senza rischiare di scansionare troppo lontano.
-    unsigned char *p = (unsigned char *)func;
-    int i, saw_cmp = 0;
-
-    for (i = 0; i < 2048; i++) {
-        /* Verifica page boundary con lookahead di 6 byte (massimo accesso: p+i+5).
-         * Il check originale (solo a boundary esatti di p+i) non proteggeva dagli
-         * accessi multi-byte vicino alla fine di una pagina → kernel panic.
-         * sys_vtpmo è chiamata solo quando p+i e p+i+6 sono su pagine diverse. */
-        if ((((unsigned long)(p + i) ^ (unsigned long)(p + i + 6)) & ~(PAGE_SIZE - 1)) &&
-            sys_vtpmo((unsigned long)(p + i + 6)) == NO_MAP)
-            break;
-
-        /* cmp r/m32, imm32: 81 /7 */
-        if (p[i] == 0x81 &&
-            (p[i+1] & 0xC0) == 0xC0 && (p[i+1] & 0x38) == 0x38) {
-            u32 imm = *(u32 *)(p + i + 2);
-            if (imm >= 256 && imm <= 600) saw_cmp = 1;
-        }
-        /* REX.W + cmp: 48/41 81 /7 */
-        if ((p[i] == 0x48 || p[i] == 0x41) && p[i+1] == 0x81 &&
-            (p[i+2] & 0xC0) == 0xC0 && (p[i+2] & 0x38) == 0x38) {
-            u32 imm = *(u32 *)(p + i + 3);
-            if (imm >= 256 && imm <= 600) saw_cmp = 1;
-        }
-
-        if (saw_cmp && p[i] == 0xE8) {
-            s32 rel = *(s32 *)(p + i + 1);
-            unsigned long tgt = (unsigned long)(p + i + 5) + (long)rel;
-            if (tgt > 0xffffffff00000000ULL)
-                return tgt;
-        }
-
-        if (p[i] == 0xC3) break;
-    }
-    return 0;
-}
-
-
-/*
- * Percorso unico: LSTAR MSR → entry_SYSCALL_64 → scan do_syscall_64
- * Questa funzione legge l'indirizzo di entry_SYSCALL_64 da LSTAR, verifica che sia valido, poi scansiona i primi 2048 byte alla ricerca di un CMP con un numero di syscall (imm tra 256 e 600) seguito da una CALL, che dovrebbe essere do_syscall_64. Se trova la CALL, restituisce il suo target; altrimenti restituisce 0. 
- * Se non trova la CALL in entry_SYSCALL_64, prova anche altre CALL vicine (fino a 8) che potrebbero essere do_syscall_64, ma in pratica su kernel recenti dovrebbe sempre trovarla in entry_SYSCALL_64. Se non trova nulla, restituisce -ENOENT.
- */
-static int find_x64_sys_call_lstar(void)
-{
-    //LSTAR in MSR contiene l'indirizzo di entry_SYSCALL_64 che gestisce le syscall in modalità 64-bit.
-    unsigned long lstar;
-    unsigned char *p;
-    int i;
-    unsigned long cands[8];
-    int ncand = 0;
-
-    rdmsrl(MSR_LSTAR, lstar);
-    //non valido perchè entry_SYSCALL_64 è sempre mappato in alto
-    if (lstar < 0xffffffff00000000ULL) {
-        printk(KERN_ERR "<throttle>: LSTAR non valido: %lx\n", lstar);
-        return -ENOENT;
-    }
-    printk(KERN_INFO "<throttle>: entry_SYSCALL_64 (LSTAR) @ %px\n", (void *)lstar);
-
-    p = (unsigned char *)lstar;
-    for (i = 0; i < 512 && ncand < 8; i++) {
-        if (!((unsigned long)(p+i) & (PAGE_SIZE-1)) &&
-            sys_vtpmo((unsigned long)(p+i)) == NO_MAP) break;
-        if (p[i] == 0xE8) {
-            s32 rel = *(s32 *)(p + i + 1);
-            unsigned long tgt = (unsigned long)(p + i + 5) + (long)rel;
-            if (tgt > 0xffffffff00000000ULL && tgt != lstar)
-                cands[ncand++] = tgt;
-        }
-        if ((p[i] == 0x0F && p[i+1] == 0x07) || p[i] == 0xCF) break;
-    }
-
-    //non ci sono candidati 
-    if (ncand == 0) {
-        printk(KERN_ERR "<throttle>: nessuna CALL trovata in entry_SYSCALL_64\n");
-        return -ENOENT;
-    }
-
-    //prova a scansionare ciascun candidato trovato in entry_SYSCALL_64, alla ricerca di do_syscall_64 tramite scan_for_x64_sys_call.
-    /*
-     * Questo approccio è orientato a coprire versioni più vecchie del kernel
-     */
-    for (i = 0; i < ncand; i++) {
-        unsigned long x64;
-        printk(KERN_INFO "<throttle>: provo do_syscall_64 @ %px\n", (void *)cands[i]);
-        x64 = scan_for_x64_sys_call(cands[i]);
-        if (x64) {
-            x64_sys_call_addr = x64;
-            printk(KERN_INFO "<throttle>: x64_sys_call @ %px (via LSTAR scan)\n",
-                   (void *)x64);
-            return 0;
-        }
-    }
-
-    printk(KERN_ERR "<throttle>: x64_sys_call non trovata\n");
-    return -ENOENT;
-}
-
-//Questa funzione è l'entry point per trovare x64_sys_call, attualmente implementato solo tramite il percorso LSTAR → entry_SYSCALL_64 → scan do_syscall_64. 
-// Se in futuro si volesse aggiungere un percorso alternativo (es. via kprobe su entry_SYSCALL_64), basterebbe modificarla per provare prima quel percorso e poi eventualmente LSTAR.
+/* Risolve x64_sys_call tramite kprobe — stesso approccio di Quaglia e F-masci. */
 int find_x64_sys_call(void)
 {
-    return find_x64_sys_call_lstar();
+    x64_sys_call_addr = lookup_unexported("x64_sys_call");
+    if (!x64_sys_call_addr) {
+        printk(KERN_ERR "<throttle>: x64_sys_call non trovata\n");
+        return -ENOENT;
+    }
+    printk(KERN_INFO "<throttle>: x64_sys_call @ %px (via kprobe)\n",
+           (void *)x64_sys_call_addr);
+    return 0;
 }
 
 /* ================================================================
@@ -313,6 +220,9 @@ struct text_patch_data {
     size_t      len;
 };
 
+// Funzione eseguita da stop_machine per scrivere il codice del stub in modo SMP-safe ovvero sicuro per multiprocessore,
+// Gestendo CR0.WP e garantendo l'atomicità su tutti i CPU.
+// Riceve una struct text_patch_data con dst, src e len, disabilita WP, copia i byte, poi ripristina WP e fa una memory barrier.
 static int do_text_patch(void *arg)
 {
     struct text_patch_data *p = arg;
@@ -343,7 +253,9 @@ static int do_text_patch(void *arg)
 static int alloc_x64_stub(void)
 {
     unsigned long sct_addr = (unsigned long)sys_call_table_ptr;
-    unsigned char stub_code[14];
+    unsigned long thunk_addr;
+    unsigned char stub_code[19];
+    size_t stub_len;
     struct text_patch_data pd;
     int ret;
 
@@ -352,22 +264,70 @@ static int alloc_x64_stub(void)
     if (ret) return ret;
 #endif
 
-    /* Costruisce il machine code del stub */
-    stub_code[0]  = 0x49; stub_code[1]  = 0xBA;  /* movabs r10, imm64 */
-    memcpy(stub_code + 2, &sct_addr, 8);           /* SCT addr hardcoded */
-    stub_code[10] = 0x41; stub_code[11] = 0xFF;   /* jmpq *(r10+rsi*8) */
-    stub_code[12] = 0x24; stub_code[13] = 0xF2;
-
     x64_stub = stub_alloc();
     if (!x64_stub) {
         printk(KERN_ERR "<throttle>: stub_alloc fallita\n");
         return -ENOMEM;
     }
 
+    /*
+     * Costruisce il machine code del stub.
+     * Se __x86_indirect_thunk_rax è disponibile (CONFIG_RETPOLINE), usa la
+     * variante retpoline per mitigare Spectre v2 (19 byte):
+     *   49 BA [8B]   movabs r10, <sct_addr>
+     *   49 8B 04 F2  mov    rax, [r10 + rsi*8]   ← sys_call_table[nr]
+     *   E9 [4B]      jmp    __x86_indirect_thunk_rax
+     *
+     * Altrimenti fallback al direct jmp (14 byte):
+     *   49 BA [8B]   movabs r10, <sct_addr>
+     *   41 FF 24 F2  jmpq   *(%r10, %rsi, 8)
+     */
+
+    //lookup per thunk __x86_indirect_thunk_rax, se presente costruisce stub con retpoline per mitigare Spectre v2;
+    //altrimenti fallback a direct jmp.
+    thunk_addr = lookup_unexported("__x86_indirect_thunk_rax");
+    if (thunk_addr) {
+        /* rel32 = indirizzo_destinazione - (indirizzo_dopo_jmp)
+         * "indirizzo dopo jmp" = base_stub + 19 (dimensione stub retpoline) */
+        long diff = (long)thunk_addr - ((long)x64_stub + 19);
+        if (diff <= (long)INT_MAX && diff >= (long)INT_MIN) {
+            int rel32 = (int)diff;
+            /* movabs r10, <sct_addr>  — 49 BA [8 byte little-endian]
+             * REX.WB (49) estende r10 a 64 bit; BA = opcode MOV r/imm64 */
+            stub_code[0]  = 0x49; stub_code[1]  = 0xBA;
+            memcpy(stub_code + 2, &sct_addr, 8);       /* imm64 = indirizzo SCT */
+            /* mov rax, [r10 + rsi*8]  — 49 8B 04 F2
+             * REX.WB (49), 8B = MOV r64←m64, ModRM 04 = SIB presente,
+             * SIB F2 = base r10 (rex.B) + index rsi * scale 8 */
+            stub_code[10] = 0x49; stub_code[11] = 0x8B;
+            stub_code[12] = 0x04; stub_code[13] = 0xF2;
+            /* jmp rel32  — E9 [4 byte little-endian]
+             * salta al retpoline thunk; rax contiene il puntatore da chiamare */
+            stub_code[14] = 0xE9;
+            memcpy(stub_code + 15, &rel32, 4);
+            stub_len = 19;
+            printk(KERN_INFO "<throttle>: stub con retpoline (thunk @ %px)\n",
+                   (void *)thunk_addr);
+        } else {
+            thunk_addr = 0; /* fuori range ±2GB, usa fallback */
+        }
+    }
+    if (!thunk_addr) {
+        /* movabs r10, <sct_addr>  — 49 BA [8 byte little-endian] */
+        stub_code[0]  = 0x49; stub_code[1]  = 0xBA;
+        memcpy(stub_code + 2, &sct_addr, 8);
+        /* jmpq *(%r10 + rsi*8)  — 41 FF 24 F2
+         * REX.B (41) per r10, FF /4 = JMP m64, ModRM 24 = SIB,
+         * SIB F2 = base r10 + index rsi * 8  →  salta a sys_call_table[nr] */
+        stub_code[10] = 0x41; stub_code[11] = 0xFF;
+        stub_code[12] = 0x24; stub_code[13] = 0xF2;
+        stub_len = 14;
+    }
+
     /* Scrive il stub via stop_machine (gestisce CR0.WP e atomicità SMP) */
     pd.dst = x64_stub;
     pd.src = stub_code;
-    pd.len = sizeof(stub_code);
+    pd.len = stub_len;
     ret = stop_machine(do_text_patch, &pd, NULL);
     if (ret) {
         printk(KERN_ERR "<throttle>: scrittura stub fallita (%d)\n", ret);

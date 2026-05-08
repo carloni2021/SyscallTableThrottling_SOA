@@ -8,6 +8,7 @@ Built on top of the syscall-table discoverer by [Prof. Francesco Quaglia](https:
 
 ## Table of Contents
 
+- [Quick Start](#quick-start)
 - [Overview](#overview)
 - [Architecture](#architecture)
 - [Design Decisions](#design-decisions)
@@ -16,13 +17,43 @@ Built on top of the syscall-table discoverer by [Prof. Francesco Quaglia](https:
   - [Process Identification via Inode](#3-process-identification-via-inode)
   - [Data Structures](#4-data-structures)
   - [Throttling Algorithm](#5-throttling-algorithm)
-  - [Thundering Herd Prevention](#6-thundering-herd-prevention)
-  - [Drain Protocol for Safe Unload](#7-drain-protocol-for-safe-unload)
-  - [Write-Protection Bypass](#8-write-protection-bypass)
+  - [Blocking vs Non-Blocking Syscalls](#6-blocking-vs-non-blocking-syscalls)
+  - [Thundering Herd Prevention](#7-thundering-herd-prevention)
+  - [Drain Protocol for Safe Unload](#8-drain-protocol-for-safe-unload)
+  - [Write-Protection Bypass](#9-write-protection-bypass)
 - [User Interface](#user-interface)
 - [Build & Usage](#build--usage)
+- [Testing & Validation](#testing--validation)
 - [Kernel Version Compatibility](#kernel-version-compatibility)
 - [File Structure](#file-structure)
+
+---
+
+## Quick Start
+
+```bash
+# Build module and userspace tools
+make
+
+# Load module and create device node
+make load
+
+# Register a program, a syscall and a UID, set limit, enable
+sudo ./throttleClient add_prog /bin/bash
+sudo ./throttleClient add_sys 1          # sys_write (nr=1)
+sudo ./throttleClient add_uid 1000
+sudo ./throttleClient set_max 5          # 5 calls/second
+sudo ./throttleClient monitor 1
+
+# Watch a loop being throttled (run in another terminal)
+while true; do echo hello; done
+
+# Query statistics
+./throttleClient stats
+
+# Unload
+make unload
+```
 
 ---
 
@@ -34,7 +65,12 @@ The module allows a privileged user to:
 2. Register one or more **syscall numbers** to intercept.
 3. Set a **maximum call rate** (calls per second, default 100).
 4. **Enable monitoring**: any registered program/UID invoking a monitored syscall beyond the rate limit is transparently blocked until the next 1-second window.
-5. Query **statistics**: peak blocking delay, peak/average number of simultaneously blocked threads.
+5. Query **statistics**: peak blocking delay, average blocking delay, peak/average number of simultaneously blocked threads.
+
+The throttle applies when **both** conditions hold:
+```
+syscall_is_registered(nr)  AND  (prog_is_registered(exe) OR uid_is_registered(euid))
+```
 
 ---
 
@@ -73,7 +109,7 @@ The kernel does not export the address of `sys_call_table`. Rather than relying 
 - `find_sys_call_table()` scans the kernel virtual address range `[0xffffffff00000000, 0xfffffffffff00000)` page by page. For each mapped page, `sct_validate_page()` checks whether 7 well-known indices of `sys_ni_syscall` (134, 174, 182, 183, 214, 215, 236) all point to the same address — a pattern stable across kernel versions that uniquely identifies the syscall table.
 
 **Why this approach:**  
-It requires no kernel symbols, no `kprobe` tricks, and no `/proc/kallsyms` parsing. It works on kernels with `CONFIG_KALLSYMS_ALL=n` and survives KASLR because the scan covers the entire possible range.
+It requires no exported kernel symbols and no `/proc/kallsyms` parsing. It works on kernels with `CONFIG_KALLSYMS_ALL=n` and survives KASLR because the scan covers the entire possible range. (A `kprobe` is used separately for `x64_sys_call` on kernel ≥ 5.15 — see below.)
 
 ---
 
@@ -90,25 +126,33 @@ From   5.15:   entry_SYSCALL_64 → do_syscall_64 → x64_sys_call(regs, nr)
 
 **Solution: redirect `x64_sys_call` to our (hooked) syscall table via an external stub.**
 
-#### Step 1 — Find `x64_sys_call` without exported symbols (LSTAR scanning)
+#### Step 1 — Find `x64_sys_call` via kprobe
 
-The MSR register `LSTAR` always contains the address of `entry_SYSCALL_64`, set by the kernel at boot. Reading it with `rdmsrl(MSR_LSTAR, lstar)` gives us a reliable entry point into kernel code without any symbol lookup.
+`x64_sys_call` is not exported. The module resolves its address using a `kprobe` — the same approach used by [Prof. Quaglia](https://github.com/FrancescoQuaglia/Linux-sys_call_table-discoverer) and [F-masci](https://github.com/F-masci/syscall-throttling):
 
-From `entry_SYSCALL_64` we collect all `CALL rel32` (opcode `0xE8`) targets to find candidates for `do_syscall_64`. Inside each candidate we search for the pattern:
-
-```
-CMP <reg>, <imm in [256, 600]>   ← bounds check against NR_syscalls
-...
-CALL rel32                       ← this is x64_sys_call
+```c
+struct kprobe kp = { .symbol_name = "x64_sys_call" };
+register_kprobe(&kp);   // kp.addr is now resolved
+unregister_kprobe(&kp); // unregistered immediately — no overhead at runtime
 ```
 
-The immediate value `NR_syscalls` (between 256 and 600 depending on kernel version) is distinctive enough to avoid false positives.
+The kprobe is registered and unregistered in a single step during `module_init`. No kprobe remains active after the address is captured, so there is zero runtime overhead from the probe.
 
-**Page-boundary safety:** reading multi-byte instructions near a page boundary can fault if the next page is not mapped. Every multi-byte access is preceded by a `sys_vtpmo` lookahead of 6 bytes; scanning stops if the next page is unmapped.
+The same helper (`lookup_unexported`) is reused on kernel ≥ 6.4 to resolve `execmem_alloc`, `execmem_free`, and `set_memory_x`, which are also no longer exported in those versions.
 
 #### Step 2 — External stub
 
-We patch the first 5 bytes of `x64_sys_call` with a `JMP rel32` pointing to a small **external stub** — 14 bytes of self-contained machine code allocated with `module_alloc()` *outside* the module's own memory:
+We patch the first 5 bytes of `x64_sys_call` with a `JMP rel32` pointing to a small **external stub** — self-contained machine code allocated with `module_alloc()` *outside* the module's own memory.
+
+If `CONFIG_RETPOLINE` is enabled, a 19-byte Spectre v2-safe stub is used (resolved at init via the same `lookup_unexported` helper):
+
+```asm
+movabs r10, <sys_call_table_addr>   ; 49 BA [8 bytes]
+mov    rax, [r10 + rsi*8]          ; 49 8B 04 F2  — sys_call_table[nr]
+jmp    __x86_indirect_thunk_rax    ; E9 [4 bytes]  — retpoline
+```
+
+Otherwise, the 14-byte direct dispatch is used:
 
 ```asm
 movabs r10, <sys_call_table_addr>   ; 49 BA [8 bytes]
@@ -172,9 +216,41 @@ The module uses a **fixed-window counter** approach:
 
 The timer callback runs in softirq context, so no sleeping is allowed inside it — only `atomic_set`, `spin_lock_irqsave`, and `wake_up_nr`.
 
+**Delay measurement:**  
+The module measures the throttle-induced delay as the time spent inside `throttle_wq`, from when the thread is blocked to when it is woken by the timer:
+
+```c
+enter_time = ktime_get();
+wait_event_interruptible_exclusive(throttle_wq, ...);
+exit_time = ktime_get();
+// delay = time waiting for throttle only — orig_fn() is called after exit_time
+```
+
+This measurement is precise because `orig_fn(regs)` is called **after** `exit_time` is recorded, so any time the syscall itself spends blocking (e.g. waiting for I/O) never enters the delay statistics.
+
 ---
 
-### 6. Thundering Herd Prevention
+### 6. Blocking vs Non-Blocking Syscalls
+
+The spec explicitly states that monitored syscalls can be of any nature — blocking or non-blocking. This has an observable effect on thread behaviour.
+
+**Non-blocking syscall (e.g. `getpid`, `write` to a pipe):**
+```
+thread → wrapper → [throttle_wq, if over limit] → orig_fn() → returns quickly
+```
+The throttle delay is the dominant and only source of latency. Delay statistics directly reflect throttling pressure.
+
+**Blocking syscall (e.g. `read` from a socket, `accept`, `futex`):**
+```
+thread → wrapper → [throttle_wq, if over limit] → orig_fn() → [blocks on I/O] → returns
+```
+The thread incurs two independent blocking phases. The throttle delay (measured by the module) and the I/O wait time (inside `orig_fn`) are completely separate. A thread that is not throttled at all may still spend seconds inside `orig_fn` — this time is never attributed to the throttle.
+
+A practical consequence: even with `MAX` set to a low value, blocking syscalls may appear to execute fewer than `MAX` per second simply because they take time to complete, not because the throttle is activating.
+
+---
+
+### 7. Thundering Herd Prevention
 
 When the timer fires and resets the window, it must wake blocked threads. A naive `wake_up_all()` would wake every waiting thread simultaneously. With 1000 threads waiting and `max_calls = 100`, all 1000 would wake, 900 would find the counter already full, and go back to sleep — wasting 900 context switches per second.
 
@@ -198,7 +274,7 @@ if (count > max_calls) { atomic_dec(&call_count); /* go back to sleep */ }
 
 ---
 
-### 7. Drain Protocol for Safe Unload
+### 8. Drain Protocol for Safe Unload
 
 #### The problem
 
@@ -251,7 +327,7 @@ The second one is a symmetric barrier ensuring no CPU is still running wrapper c
 
 ---
 
-### 8. Write-Protection Bypass
+### 9. Write-Protection Bypass
 
 The syscall table resides in kernel read-only memory. To replace entries, two hardware protections must be temporarily disabled:
 
@@ -272,20 +348,23 @@ The module exposes `/dev/throttleDriver` as a character device. All configuratio
 |---------|-----------|-------------|
 | `IOCTL_ADD_PROG` | write | Register a program by filesystem path |
 | `IOCTL_DEL_PROG` | write | Unregister a program |
-| `IOCTL_LIST_PROGS` | read | List registered programs |
 | `IOCTL_ADD_UID` | write | Register a UID |
 | `IOCTL_DEL_UID` | write | Unregister a UID |
-| `IOCTL_LIST_UIDS` | read | List registered UIDs |
 | `IOCTL_ADD_SYSCALL` | write | Hook a syscall (by number) |
 | `IOCTL_DEL_SYSCALL` | write | Unhook a syscall |
-| `IOCTL_LIST_SYSCALLS` | read | List hooked syscalls |
 | `IOCTL_SET_MONITOR` | write | Enable / disable throttling |
 | `IOCTL_GET_STATUS` | read | Current state: enabled, max_calls, call_count |
 | `IOCTL_SET_MAX` | write | Set calls-per-second limit |
-| `IOCTL_GET_STATS` | read | Peak delay, peak/avg blocked threads |
+| `IOCTL_GET_STATS` | read | Peak/avg delay, peak/avg blocked threads, total calls |
 | `IOCTL_RESET_STATS` | — | Reset statistics counters |
 
 Write commands require `euid == 0`. Read commands are available to all users.
+
+Listing registered programs, UIDs, and syscalls is done via `read()` on the device (not via ioctl), allowing a dynamically-sized text response with no fixed buffer limits:
+
+```bash
+./throttleClient list     # reads /dev/throttleDriver in a loop until EOF
+```
 
 ---
 
@@ -315,6 +394,45 @@ make unload
 
 ---
 
+## Testing & Validation
+
+Two test programs are provided, each self-configuring (they open the device, register themselves, run, verify, and clean up):
+
+### throttleTest — Non-blocking syscall, multi-thread
+
+```bash
+sudo ./throttleTest <num_threads> <duration_sec> <MAX> [rate_per_thread]
+
+# Examples:
+sudo ./throttleTest 8 6 200        # 8 threads at full speed, limit 200/s
+sudo ./throttleTest 8 6 200 50     # each thread attempts 50 calls/s
+```
+
+Spawns N threads that invoke `getpid` (nr=39) in a tight loop. At the end, reads the driver statistics and automatically verifies that the observed call rate did not exceed `MAX`. Prints `PASS` or `FAIL`.
+
+### throttleTest2 — Blocking syscall + UID-based throttling
+
+```bash
+sudo ./throttleTest2 <num_workers> <duration_sec> <MAX>
+
+# Example:
+sudo ./throttleTest2 8 6 200
+```
+
+Runs two independent tests:
+
+**Test 1 — Blocking syscall (`read` on `/dev/zero`):**  
+Verifies that throttling works correctly for a syscall that naturally blocks in kernel space. `/dev/zero` is used as the source so that no additional I/O latency is introduced — the only limiting factor is the module's rate limit. This demonstrates that the flow `thread → wrapper → sleep in throttle_wq → orig_fn() → data` works identically to the non-blocking case.
+
+**Test 2 — UID-based throttling:**  
+Verifies that the rate limit is applied based on the caller's effective UID, independently of the program name. Two groups of child processes run in parallel via `fork()` + `setresuid()`:
+- **throttled group**: N children with `euid = TARGET_UID` (60001) — subject to `MAX`
+- **control group**: M children with `euid = CONTROL_UID` (60002) — no limit applied
+
+Shared counters between processes use `mmap(MAP_SHARED|MAP_ANONYMOUS)` with `_Atomic` variables for lock-free coordination.
+
+---
+
 ## Kernel Version Compatibility
 
 | Kernel range | Dispatch path | Module behaviour |
@@ -332,10 +450,11 @@ make unload
 throttle.h             — shared types, IOCTL definitions, extern declarations
 throttle_main.c        — module init/exit, global state, drain protocol orchestration
 throttle_mem.c         — page-table walk (sys_vtpmo), CR0/CR4 write-protect bypass
-throttle_discovery.c   — sys_call_table finder, x64_sys_call LSTAR scanner, stub allocator
+throttle_discovery.c   — sys_call_table finder (CR3 walk), x64_sys_call kprobe lookup, stub allocator
 throttle_hook.c        — generic_sct_wrapper, install_hook / remove_hook, drain accounting
 throttle_core.c        — throttle_check, hrtimer callback, process identification
 throttle_dev.c         — character device driver, ioctl handler
 throttleClient.c       — userspace configuration tool
-throttleTest.c         — multi-threaded test harness
+throttleTest.c         — multi-threaded test: non-blocking syscall (getpid), auto PASS/FAIL
+throttleTest2.c        — advanced test: blocking syscall (read) + UID-based throttling
 ```
