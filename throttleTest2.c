@@ -351,26 +351,9 @@ static int test_uid(int drv_fd, int nworkers, int duration, int max_val)
     ioctl(drv_fd, IOCTL_RESET_STATS, NULL);
 
     /* ---- Misurazione throughput ---- */
-    long base_thr = atomic_load(&sh->throttled_calls);  /* baseline post-warmup */
     long base_ctl = atomic_load(&sh->control_calls);
-    long prev_thr = base_thr;
-    long prev_ctl = base_ctl;
-    long *ps_thr  = malloc(duration * sizeof(long));
-    long *ps_ctl  = malloc(duration * sizeof(long));
 
-    printf("  sec  throttled/s  control/s  stato\n");
-    printf("  ---  -----------  ---------  -----\n");
-    for (int s = 0; s < duration; s++) {
-        sleep(1);
-        long cur_thr = atomic_load(&sh->throttled_calls);
-        long cur_ctl = atomic_load(&sh->control_calls);
-        ps_thr[s] = cur_thr - prev_thr;
-        ps_ctl[s] = cur_ctl - prev_ctl;
-        prev_thr  = cur_thr;
-        prev_ctl  = cur_ctl;
-        printf("  %3d  %11ld  %9ld  %s\n", s+1, ps_thr[s], ps_ctl[s],
-               ps_thr[s] > (long)(max_val * 1.5) ? "ANOMALIA" : "ok");
-    }
+    sleep(duration);
 
     /* Cattura il totale del gruppo control prima di fermare i processi:
      * dopo IOCTL_SET_MONITOR(0) i processi throttled bloccati si svegliano
@@ -410,9 +393,6 @@ static int test_uid(int drv_fd, int nworkers, int duration, int max_val)
      * superiore a MAX per dimostrare che il throttling è selettivo.
      */
     int pass_ctl_free = (avg_ctl > max_val * 5.0);
-
-    free(ps_thr);
-    free(ps_ctl);
 
     printf("\n  -- Statistiche driver (gruppo throttled, allineate all'hrtimer) --\n");
     printf("  Peak calls/finestra : %ld\n",   st.peak_calls_per_window);
