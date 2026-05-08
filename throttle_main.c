@@ -77,6 +77,7 @@ static int __init throttle_init(void)
 }
 
 //Funzione di cleanup del modulo: rimuove hook, drena i thread in-flight, cancella timer, pulisce liste
+//i thread già dentro generic_sct_wrapper continuano fino al completamento
 static void __exit throttle_exit(void)
 {
     struct prog_node  *pcursor;
@@ -124,6 +125,7 @@ static void __exit throttle_exit(void)
     hrtimer_cancel(&window_timer);
     printk(KERN_INFO "<throttle>: exit [8] timer cancellato\n");
 
+    //pulizia delle hash table e bitmap: rimuove tutti i nodi e azzera la bitmap, con spinlock per sicurezza
     spin_lock_irqsave(&config_lock, flags);
     hash_for_each_safe(prog_table, bkt, htmp, pcursor, hnode)
         { hash_del(&pcursor->hnode); kfree(pcursor); }

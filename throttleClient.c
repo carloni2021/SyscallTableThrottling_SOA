@@ -1,5 +1,5 @@
 /*
- * throttle_ctl.c — tool userspace per configurare throttleDriver
+ * throttle_ctl.c — tool userspace che espone i comandi per configurare throttleDriver
  *
  * Uso:
  *   sudo ./throttle_ctl add_prog  <nome>

@@ -3,7 +3,7 @@
  * throttle_mem.c — Accesso hardware a basso livello
  *
  * sys_vtpmo: page-table walk via CR3, basato su lib/vtpmo.c di
- *            Francesco Quaglia (GPL-2.0). Percorre PML4→PDP→PDE→PTE.
+ *            Francesco Quaglia https://github.com/FrancescoQuaglia/Linux-sys_call_table-discoverer Percorre PML4→PDP→PDE→PTE.
  *
  * begin/end_syscall_table_hack: disabilita CR0.WP (e CR4.CET se presente)
  *   per consentire la scrittura sulla sys_call_table in memoria read-only.

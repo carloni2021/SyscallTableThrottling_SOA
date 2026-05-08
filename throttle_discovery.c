@@ -7,7 +7,7 @@
  *   Basato su usctm.c https://github.com/FrancescoQuaglia/Linux-sys_call_table-discoverer del Professor Francesco Quaglia.
  *
  * x64_sys_call (kernel >= 5.15): risolto tramite kprobe su "x64_sys_call",
- *   stesso approccio di Quaglia e F-masci.
+ *   stesso approccio di Quaglia.
  *
  * patch_x64_sys_call: alloca uno stub eseguibile FUORI dal modulo via
  *   module_alloc(), scrive machine code auto-contenuto, poi installa un
@@ -197,7 +197,7 @@ static int resolve_stub_fns(void)
 #  define stub_set_memory_x(a)  set_memory_x((unsigned long)(a), 1)
 #endif
 
-/* Risolve x64_sys_call tramite kprobe — stesso approccio di Quaglia e F-masci. */
+/* Risolve x64_sys_call tramite kprobe — stesso approccio di Quaglia. */
 int find_x64_sys_call(void)
 {
     x64_sys_call_addr = lookup_unexported("x64_sys_call");
