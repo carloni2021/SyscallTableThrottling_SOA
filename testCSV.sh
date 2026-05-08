@@ -43,7 +43,7 @@ fi
 # ----------------------------------------------------------------
 #  Header CSV
 # ----------------------------------------------------------------
-echo "threads,MAX,avg_calls_finestra,peak_calls_finestra,avg_delay_ns,peak_delay_ns,avg_bloccati,peak_bloccati,esito" > "$OUTPUT"
+echo "threads,MAX,avg_calls_finestra,peak_calls_finestra,avg_delay_ns,peak_delay_ns,avg_bloccati,peak_bloccati" > "$OUTPUT"
 
 TOTALE=$((${#THREADS[@]} * ${#MAX_VALUES[@]}))
 N=0
@@ -77,7 +77,6 @@ for t in "${THREADS[@]}"; do
         avg_delay=$(echo  "$out" | awk '/Avg  delay/  && !/prog/ && !/uid/ {print $4}')
         peak_blocc=$(echo "$out" | awk '/Peak bloccati/{print $4}')
         avg_blocc=$(echo  "$out" | awk '/Avg  bloccati/{print $4}')
-        esito=$(echo      "$out" | grep -E "^\s+(PASS|FAIL)$" | tr -d ' ')
 
         # Fallback se parsing fallisce (es. driver non ha restituito stats)
         avg_calls="${avg_calls:-N/A}"
@@ -86,9 +85,8 @@ for t in "${THREADS[@]}"; do
         avg_delay="${avg_delay:-N/A}"
         peak_blocc="${peak_blocc:-N/A}"
         avg_blocc="${avg_blocc:-N/A}"
-        esito="${esito:-N/A}"
 
-        echo "$t,$m,$avg_calls,$peak_calls,$avg_delay,$peak_delay,$avg_blocc,$peak_blocc,$esito" >> "$OUTPUT"
+        echo "$t,$m,$avg_calls,$peak_calls,$avg_delay,$peak_delay,$avg_blocc,$peak_blocc" >> "$OUTPUT"
         echo "(avg=$avg_calls  peak_delay=${peak_delay}ns  peak_blocc=$peak_blocc)"
 
         # Pausa breve per lasciare il modulo in stato pulito tra un run e l'altro
