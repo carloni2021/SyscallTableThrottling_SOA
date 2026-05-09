@@ -167,8 +167,7 @@ void throttle_check(int nr)
     uid_t         euid;
     unsigned long flags;
     int           registered, count;
-    ktime_t       enter_time, exit_time;
-    long long     delay_ns;
+    ktime_t       enter_time;
 
     //evitiamo di girare a vuoto
     if (!READ_ONCE(monitor_enabled)) return;
@@ -207,34 +206,38 @@ void throttle_check(int nr)
 
     {
         int ret;
+        int got_slot = 0;
         while (1) {
-            /* ricorda che READ_ONCE garantisce che il compilatore rilegga ogni variabile dalla memoria ad ogni iterazione, invece di cacharne il valore
-             * in un registro — necessario perché max_calls, monitor_enabled e module_unloading possono cambiare su altri CPU in qualsiasi momento.
-             * _exclusive evita il "thundering herd problem": wake_up_nr(N) sveglia solo N thread invece di tutti, uno per slot disponibile. */
-            ret = wait_event_interruptible_exclusive(throttle_wq,atomic_read(&call_count) < READ_ONCE(max_calls) || !READ_ONCE(monitor_enabled) || READ_ONCE(module_unloading));
-            if (ret != 0 || !READ_ONCE(monitor_enabled) || READ_ONCE(module_unloading)) break;
+            /* READ_ONCE garantisce rilettura dalla memoria ad ogni iterazione.
+             * _exclusive evita thundering herd: wake_up_nr(N) sveglia solo N thread. */
+            ret = wait_event_interruptible_exclusive(throttle_wq,
+                atomic_read(&call_count) < READ_ONCE(max_calls) ||
+                !READ_ONCE(monitor_enabled) || READ_ONCE(module_unloading));
+            if (ret != 0 || !READ_ONCE(monitor_enabled) || READ_ONCE(module_unloading))
+                break;
 
             count = atomic_inc_return(&call_count);
-            if (count <= READ_ONCE(max_calls)) break;
+            if (count <= READ_ONCE(max_calls)) { got_slot = 1; break; }
             atomic_dec(&call_count);
         }
-    }
 
-    //aggiorniamo numero bloccati e statistiche di delay del thread appena sbloccato
-    atomic_dec(&current_blocked);
-    exit_time = ktime_get();
-    delay_ns  = ktime_to_ns(ktime_sub(exit_time, enter_time));
-
-    /* Scelta di design: è contare nel tempo di ritardo anche il ritardo
-     * dei thread in attesa che non sono stati eseguiti nel lasso di
-     * tempo in esaminazione. */
-    spin_lock_irqsave(&stats_lock, flags);
-    if (delay_ns > peak_delay_ns) {
-        peak_delay_ns  = delay_ns;
-        peak_delay_uid = euid;
-        strscpy(peak_delay_prog, comm, TASK_COMM_LEN);
+        /* Registra il delay solo se il thread ha effettivamente ottenuto uno slot
+         * ed eseguirà la syscall. Le uscite forzate (monitor spento, segnale,
+         * unloading) non rappresentano un ritardo di throttling reale: il thread
+         * non eseguirà la syscall, quindi misurare il delay sarebbe fuorviante. */
+        atomic_dec(&current_blocked);
+        if (got_slot) {
+            ktime_t   exit_time = ktime_get();
+            long long delay_ns  = ktime_to_ns(ktime_sub(exit_time, enter_time));
+            spin_lock_irqsave(&stats_lock, flags);
+            if (delay_ns > peak_delay_ns) {
+                peak_delay_ns  = delay_ns;
+                peak_delay_uid = euid;
+                strscpy(peak_delay_prog, comm, TASK_COMM_LEN);
+            }
+            total_delay_ns += delay_ns;
+            delay_count    += 1;
+            spin_unlock_irqrestore(&stats_lock, flags);
+        }
     }
-    total_delay_ns += delay_ns;
-    delay_count    += 1;
-    spin_unlock_irqrestore(&stats_lock, flags);
 }

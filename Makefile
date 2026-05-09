@@ -37,14 +37,21 @@ $(TEST2): $(TEST2).c
 # Per inserimento/rimozione modulo 
 load: module
 	sudo insmod $(MODULE).ko
-	sudo mknod /dev/$(MODULE) c $$(awk '$$2=="$(MODULE)" {print $$1}' /proc/devices) 0666
+	sudo mknod /dev/$(MODULE) c $$(awk '$$2=="$(MODULE)" {print $$1}' /proc/devices) 0
+	sudo chmod 0666 /dev/$(MODULE)
 
 unload:
+	@if ! lsmod | grep -q "^$(MODULE) "; then \
+	    echo "$(MODULE) non è caricato, nulla da fare."; \
+	    sudo rm -f /dev/$(MODULE); \
+	    exit 0; \
+	fi
 	@MAJOR=$$(awk '$$2=="$(MODULE)"{print $$1}' /proc/devices 2>/dev/null); \
 	 if [ -n "$$MAJOR" ] && [ ! -c /dev/$(MODULE) ]; then \
-	     sudo mknod /dev/$(MODULE) c $$MAJOR 0666; \
+	     sudo mknod /dev/$(MODULE) c $$MAJOR 0; \
+	     sudo chmod 0666 /dev/$(MODULE); \
 	 fi
-	-sudo ./$(CLIENT) monitor 0
+	-sudo $(PWD)/$(CLIENT) monitor 0
 	sleep 0.2
 	sudo rmmod $(MODULE) || true
 	sudo rm -f /dev/$(MODULE)

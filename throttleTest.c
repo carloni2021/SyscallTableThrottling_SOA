@@ -147,7 +147,7 @@ int main(int argc, char *argv[])
             "Esempio: sudo %s 8 6 200\n"
             "         sudo %s 8 6 200 50\n"
             "         sudo %s 8 6 200 0 0   # baseline: hook attivi, monitor off\n",
-            argv[0], argv[0], argv[0]);
+            argv[0], argv[0], argv[0],argv[0]);
         return 1;
     }
 
