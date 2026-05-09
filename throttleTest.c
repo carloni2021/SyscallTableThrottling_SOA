@@ -137,14 +137,16 @@ int main(int argc, char *argv[])
 {
     if (argc < 4) {
         fprintf(stderr,
-            "Uso: sudo %s <num_thread> <durata_sec> <MAX> [rate_per_thread]\n"
+            "Uso: sudo %s <num_thread> <durata_sec> <MAX> [rate_per_thread] [monitor_on]\n"
             "  num_thread:      thread concorrenti che invocano la syscall\n"
             "  durata_sec:      durata del test (secondi)\n"
             "  MAX:             invocazioni/s massime da impostare nel driver\n"
             "  rate_per_thread: (opzionale) calls/s che ogni thread tenta;\n"
             "                   se omesso i thread girano a velocità massima\n"
+            "  monitor_on:      (opzionale, default 1) 0=monitor OFF (baseline), 1=monitor ON\n"
             "Esempio: sudo %s 8 6 200\n"
-            "         sudo %s 8 6 200 50\n",
+            "         sudo %s 8 6 200 50\n"
+            "         sudo %s 8 6 200 0 0   # baseline: hook attivi, monitor off\n",
             argv[0], argv[0], argv[0]);
         return 1;
     }
@@ -153,6 +155,7 @@ int main(int argc, char *argv[])
     int duration        = atoi(argv[2]);
     int max_val         = atoi(argv[3]);
     int rate_per_thread = (argc >= 5) ? atoi(argv[4]) : 0;
+    int monitor_on      = (argc >= 6) ? (atoi(argv[5]) != 0) : 1;
 
     if (num_threads <= 0 || duration <= 0 || max_val <= 0) {
         fprintf(stderr, "Errore: num_thread, durata_sec e MAX devono essere > 0.\n");
@@ -195,6 +198,7 @@ int main(int argc, char *argv[])
                rate_per_thread, rate_per_thread * num_threads);
     else
         printf("  Rate/thr  : massima velocita'\n");
+    printf("  Monitor   : %s\n", monitor_on ? "ON" : "OFF (baseline)");
     printf("=========================================\n\n");
 
     /* ---- Configura il driver ---- */
@@ -210,10 +214,12 @@ int main(int argc, char *argv[])
         perror("IOCTL_SET_MAX");
         do_cleanup(fd, progpath); close(fd); return 1;
     }
-    int mon = 1;
-    if (ioctl(fd, IOCTL_SET_MONITOR, &mon) < 0) {
-        perror("IOCTL_SET_MONITOR");
-        do_cleanup(fd, progpath); close(fd); return 1;
+    if (monitor_on) {
+        int mon = 1;
+        if (ioctl(fd, IOCTL_SET_MONITOR, &mon) < 0) {
+            perror("IOCTL_SET_MONITOR");
+            do_cleanup(fd, progpath); close(fd); return 1;
+        }
     }
 
     /* ---- Lancia i thread ---- */

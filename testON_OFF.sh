@@ -1,15 +1,13 @@
 #!/bin/bash
-# testON_OFF.sh — confronto baseline vs throttling attivo
+# testON_OFF.sh — confronto monitor OFF (baseline) vs monitor ON (throttling attivo)
 #
-# Esegue throttleTest due volte con gli stessi parametri:
-#   Run 1 — MAX altissimo (throttling mai attivo): misura il comportamento
-#            del modulo senza limitazione, comprensivo dell'overhead degli hook.
-#   Run 2 — MAX reale: misura il throttling in azione.
+# Esegue throttleTest due volte con gli stessi parametri e lo stesso MAX:
+#   Run 1 — monitor OFF: hook installati ma nessun blocco — baseline pulito.
+#   Run 2 — monitor ON:  throttling attivo al limite MAX configurato.
 #
 # Il confronto mostra:
-#   - overhead introdotto dagli hook (run 1 vs esecuzione senza modulo)
-#   - effetto del throttling (run 1 vs run 2)
-#   - delay e thread bloccati introdotti dal rate limiting
+#   - overhead degli hook senza throttling (run 1)
+#   - costo aggiuntivo del blocking (differenza run 2 - run 1)
 #
 # Uso:
 #   sudo ./testON_OFF.sh <num_thread> <durata_sec> <MAX>
@@ -20,7 +18,6 @@
 set -e
 
 THROTTLE_TEST="./throttleTest"
-MAX_BASELINE=9999999   # mai raggiungibile → throttle inattivo, hook attivi
 
 if [ "$#" -lt 3 ]; then
     echo "Uso: sudo $0 <num_thread> <durata_sec> <MAX>" >&2
@@ -60,19 +57,19 @@ estrai_avg_blocc()  { echo "$1" | awk '/Avg  bloccati/{print $4}'; }
 estrai_esito()      { echo "$1" | grep -E "^\s+(PASS|FAIL)$" | tr -d ' '; }
 
 echo "========================================================"
-echo "  testON_OFF — baseline vs throttling attivo"
+echo "  testON_OFF — monitor OFF (baseline) vs monitor ON"
 echo "========================================================"
 echo "  Thread   : $THREADS"
 echo "  Durata   : ${DURATA}s per run"
-echo "  MAX test : $MAX inv/s"
+echo "  MAX      : $MAX inv/s"
 echo "========================================================"
 echo ""
 
 # ----------------------------------------------------------------
-#  Run 1: baseline — MAX altissimo, throttle mai attivo
+#  Run 1: monitor OFF — hook attivi, nessun throttling
 # ----------------------------------------------------------------
-echo "[1/2] Baseline (MAX=$MAX_BASELINE, throttle inattivo) ..."
-out_base=$("$THROTTLE_TEST" "$THREADS" "$DURATA" "$MAX_BASELINE" 2>&1) || true
+echo "[1/2] Baseline (monitor OFF, MAX=$MAX) ..."
+out_base=$("$THROTTLE_TEST" "$THREADS" "$DURATA" "$MAX" 0 2>&1) || true
 
 b_avg_calls=$(estrai_avg_calls  "$out_base")
 b_peak_calls=$(estrai_peak_calls "$out_base")
@@ -91,9 +88,9 @@ echo ""
 sleep 1
 
 # ----------------------------------------------------------------
-#  Run 2: throttling attivo — MAX reale
+#  Run 2: monitor ON — throttling attivo
 # ----------------------------------------------------------------
-echo "[2/2] Throttling attivo (MAX=$MAX) ..."
+echo "[2/2] Throttling attivo (monitor ON, MAX=$MAX) ..."
 out_thr=$("$THROTTLE_TEST" "$THREADS" "$DURATA" "$MAX" 2>&1) || true
 
 t_avg_calls=$(estrai_avg_calls  "$out_thr")

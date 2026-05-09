@@ -5,8 +5,7 @@
  *
  *  TEST 1 — Syscall bloccante: read(2) su /dev/zero
  *    Verifica che il meccanismo di throttling funzioni correttamente
- *    per una syscall che, per natura, può bloccare il thread in kernel
- *    space in attesa di dati.  read(2) è il caso classico: il wrapper
+ *    per una syscall bloccante.  read(2) è il caso classico: il wrapper
  *    SCT intercetta la chiamata, esegue throttle_check() (che può mettere
  *    il thread nella wait queue), e solo dopo chiama l'handler originale.
  *    L'utilizzo di /dev/zero garantisce che la sorgente non introduca
@@ -306,7 +305,11 @@ static int test_uid(int drv_fd, int nworkers, int duration, int max_val)
     printf("  Durata          : %d s  |  MAX = %d inv/s\n\n",
            duration, max_val);
 
-    /* ---- Alloca stato condiviso (padre + tutti i figli) ---- */
+    /* ---- Alloca stato condiviso (padre + tutti i figli) ----
+     * fork() copia lo spazio di memoria: senza memoria condivisa ogni figlio
+     * avrebbe il suo contatore isolato. MAP_SHARED|MAP_ANONYMOUS mappa le
+     * stesse pagine fisiche in tutti i processi, le variabili _Atomic usano
+     * LOCK XADD sul bus e sono quindi atomiche anche tra processi distinti. */
     struct t2_shared *sh = mmap(NULL, sizeof(*sh),
                                 PROT_READ | PROT_WRITE,
                                 MAP_SHARED | MAP_ANONYMOUS, -1, 0);

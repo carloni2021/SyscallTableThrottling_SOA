@@ -5,11 +5,11 @@ che implementa un meccanismo di *System Call Throttling*.
 
 Il modulo permette di limitare il numero di invocazioni di specifiche system call
 da parte di programmi o utenti monitorati. La politica di throttling è basata su una
-**finestra temporale fissa di 1 secondo**: i thread che superano il limite MAX configurato
+**finestra temporale di 1 secondo**: i thread che superano il limite MAX configurato
 vengono bloccati trasparentemente fino all'apertura della finestra successiva. Il modulo
 raccoglie inoltre statistiche sul delay introdotto e sul numero di thread bloccati.
 
-Il throttling si attiva quando valgono **entrambe** le condizioni:
+Il throttling si attiva quando valgono le condizioni:
 ```
 syscall_is_registered(nr)  AND  (prog_is_registered(exe) OR uid_is_registered(euid))
 ```
@@ -54,7 +54,7 @@ L'interazione con il modulo avviene tramite `ioctl` sul device file `/dev/thrott
 È fornito il tool userspace `throttleClient` per inviare comandi al modulo.
 
 > **Nota:** Tutti i comandi di configurazione richiedono privilegi di **root**.
-> I comandi di lettura (`status`, `stats`, `list`) sono accessibili a tutti gli utenti.
+> I comandi di lettura (`status`, `stats`, `list`) sono invece accessibili a tutti gli utenti.
 
 ### Esempi di comandi
 
@@ -94,7 +94,7 @@ sudo ./throttleClient reset_stats  # azzera le statistiche
 **5. Listing:**
 
 La lista dei filtri registrati non avviene tramite ioctl ma tramite `read()` sul device,
-senza limiti di dimensione fissi:
+in modo di evitare limiti di dimensione fissi:
 
 ```bash
 ./throttleClient list   # legge /dev/throttleDriver in loop fino a EOF
@@ -110,7 +110,7 @@ Il modulo è sviluppato e testato su **Linux ≥ 5.15 / x86-64**. Le scelte real
 non portabili riguardano:
 
 - Ricerca della `sys_call_table` tramite page-table walk hardware da `CR3` (PML4→PDP→PDE→PTE).
-- Patching di `x64_sys_call` su kernel ≥ 5.15, dove il dispatch non usa più la SCT direttamente.
+- Patching di `x64_sys_call` su kernel ≥ 5.15 in particolare (6.17), dove il dispatch non usa più la SCT direttamente.
 - Stub esterno allocato con `module_alloc()` fuori dalla memoria del modulo.
 - Bypass di `CR0.WP` e `CR4.CET` tramite assembly inline per scrivere in memoria read-only.
 - `hrtimer` con `CLOCK_MONOTONIC` per il reset della finestra di throttling.
@@ -131,33 +131,6 @@ non portabili riguardano:
 | `make unload` | Scarica il modulo (`rmmod`) e rimuove il device node |
 | `make clean` | Rimuove tutti i file oggetto, il modulo compilato e i binari |
 
-### Workflow tipico
-
-```bash
-# 1. Carica il modulo
-make load
-
-# 2. Registra i filtri
-sudo ./throttleClient add_prog /usr/bin/myapp
-sudo ./throttleClient add_sys 1        # sys_write
-sudo ./throttleClient set_max 50       # 50 chiamate/secondo
-
-# 3. Abilita il monitor
-sudo ./throttleClient monitor 1
-
-# 4. Verifica lo stato
-./throttleClient status
-
-# 5. Esegui i test
-sudo ./throttleTest 8 6 200
-
-# 6. Consulta le statistiche
-./throttleClient stats
-
-# 7. Scarica il modulo
-make unload
-```
-
 ---
 
 ## Test e Validazione
@@ -168,11 +141,12 @@ registrano sé stessi, eseguono il test e puliscono la configurazione al termine
 ### throttleTest — Syscall non bloccante, multi-thread
 
 ```bash
-sudo ./throttleTest <num_thread> <durata_sec> <MAX> [rate_per_thread]
+sudo ./throttleTest <num_thread> <durata_sec> <MAX> [rate_per_thread] [monitor_on]
 
 # Esempi:
-sudo ./throttleTest 8 6 200        # 8 thread a piena velocità, limite 200/s
-sudo ./throttleTest 8 6 200 50     # ogni thread tenta 50 chiamate/s
+sudo ./throttleTest 8 6 200          # 8 thread a piena velocità, limite 200/s
+sudo ./throttleTest 8 6 200 50       # ogni thread tenta 50 chiamate/s
+sudo ./throttleTest 8 6 200 0 0      # baseline: hook attivi, monitor OFF
 ```
 
 Lancia N thread che invocano `getpid` (nr=39) in un loop continuo. Al termine legge le
@@ -194,14 +168,14 @@ Esegue due test indipendenti:
 Verifica che il throttling funzioni correttamente per una syscall che si blocca in kernel
 space. `/dev/zero` elimina la latenza I/O reale: l'unico fattore limitante è il rate limit
 del modulo. Dimostra che il flusso `thread → wrapper → throttle_wq → orig_fn() → dato`
-funziona identicamente al caso non bloccante.
+funziona identicamente al caso non-bloccante.
 
 **Test 2 — Throttling per UID:**
 Verifica che il limite venga applicato in base all'UID effettivo del chiamante,
 indipendentemente dal nome del programma. Due gruppi di processi figli girano in parallelo
 via `fork()` + `setresuid()`:
 - **gruppo throttlato**: N figli con `euid = TARGET_UID` (60001) — soggetti al limite MAX
-- **gruppo di controllo**: M figli con `euid = CONTROL_UID` (60002) — nessun limite
+- **gruppo di "controllo"**: M figli con `euid = CONTROL_UID` (60002) — nessun limite
 
 I contatori condivisi tra processi usano `mmap(MAP_SHARED|MAP_ANONYMOUS)` con variabili
 `_Atomic` per la coordinazione lock-free.
@@ -215,11 +189,11 @@ sudo ./testCSV.sh [durata_sec] [output.csv]
 sudo ./testCSV.sh 6 campagna.csv
 ```
 
-Esegue `throttleTest` su una matrice completa **thread ∈ {1,2,4,8} × MAX ∈ {10,50,100}**
+Esegue `throttleTest` su una matrice completa **thread in {1,2,4,8} × MAX in {10,50,100}**
 (12 run totali) e salva i risultati in un file CSV:
 
 ```
-threads,MAX,avg_calls_finestra,peak_calls_finestra,avg_delay_ns,peak_delay_ns,avg_bloccati,peak_bloccati,esito
+threads,MAX,avg_calls_finestra,peak_calls_finestra,avg_delay_ns,peak_delay_ns,avg_bloccati,peak_bloccati
 1,10,...
 ...
 8,100,...
@@ -237,14 +211,14 @@ sudo ./testON_OFF.sh <num_thread> <durata_sec> <MAX>
 sudo ./testON_OFF.sh 4 6 50
 ```
 
-Esegue `throttleTest` due volte con gli stessi parametri:
+Esegue `throttleTest` due volte con lo stesso MAX:
 
-- **Run 1 — Baseline**: MAX altissimo (throttling mai attivo) — misura il comportamento
-  del modulo senza limitazione, comprensivo dell'overhead degli hook installati.
-- **Run 2 — Throttling attivo**: MAX reale — misura il rate limiting in azione.
+- **Run 1 — Baseline**: monitor OFF — hook installati ma nessun blocco. Misura l'overhead
+  puro degli hook senza throttling attivo.
+- **Run 2 — Throttling attivo**: monitor ON — misura il rate limiting in azione.
 
-Stampa i risultati affiancati per mostrare l'effetto del throttling su throughput,
-delay e thread bloccati.
+Stampa i risultati affiancati per mostrare il costo aggiuntivo del blocking rispetto
+all'overhead di base degli hook.
 
 ---
 
@@ -278,7 +252,7 @@ Dal kernel 5.15 il percorso di dispatch è cambiato:
 `x64_sys_call` è un `switch` generato dal compilatore che **non usa** la SCT. Sostituire
 le entry della tabella non è più sufficiente.
 
-**Soluzione:** reindirizzare `x64_sys_call` verso la nostra SCT (già hookiata) tramite
+**Soluzione:** reindirizzare `x64_sys_call` verso la nostra SCT (già hookata) tramite
 uno **stub esterno**. L'indirizzo di `x64_sys_call` viene risolto con un kprobe
 (registrato e rimosso immediatamente a init, zero overhead a runtime). I primi 5 byte
 di `x64_sys_call` vengono sostituiti con un `JMP rel32` verso lo stub.
@@ -300,7 +274,7 @@ jmpq   *(%r10, %rsi, 8)
 
 Lo stub è esterno al modulo perché la memoria del modulo viene liberata dopo
 `module_exit()`. Lo stub sopravvive indipendentemente e viene liberato esplicitamente
-dopo il drain protocol.
+dopo.
 
 Su kernel ≥ 6.4, `execmem_alloc`, `execmem_free` e `set_memory_x` non sono più
 esportate e vengono risolte a runtime con lo stesso helper kprobe.
@@ -317,18 +291,17 @@ con lo stesso nome. L'identità inode+device:
 - distingue hard link su filesystem diversi
 - non può essere falsificata dal processo monitorato
 
-`mmap_read_lock(mm)` viene tenuto durante la lettura di `exe_file` per prevenire
-race con `execve` o `exit_mm`.
+`lettura dell'eseguibile protetta tramite mmap_read_lock(mm)`.
 
 ### 4. Strutture dati
 
-| Cosa | Struttura | Chiave | Complessità |
-|------|-----------|--------|-------------|
-| Programmi monitorati | Hashtable kernel (`DEFINE_HASHTABLE`, 256 bucket) | numero di inode | O(1) medio |
-| UID monitorati | Hashtable kernel (`DEFINE_HASHTABLE`, 256 bucket) | valore uid | O(1) medio |
-| Syscall monitorate | Bitmap kernel (`DECLARE_BITMAP`, NR_syscalls bit) | numero syscall | O(1) |
+| Cosa | Struttura    | Chiave | Complessità |
+|------|--------------|--------|-------------|
+| Programmi monitorati | Hashtable kernel | numero di inode | O(1) medio |
+| UID monitorati | Hashtable kernel | valore uid | O(1) medio |
+| Syscall monitorate | Bitmap kernel| numero syscall | O(1) |
 
-La bitmap è la struttura più importante nel hot path: `test_bit(nr, syscall_bitmap)` è
+La bitmap è la struttura più importante : `test_bit(nr, syscall_bitmap)` è
 una singola istruzione bitwise senza allocazione, eseguita ad ogni invocazione prima
 di qualsiasi lock.
 
@@ -340,12 +313,6 @@ Il modulo usa un approccio a **contatore su finestra fissa**:
 - Un `hrtimer` scatta ogni secondo (`CLOCK_MONOTONIC`) e azzera atomicamente `call_count`.
 - Ad ogni invocazione monitorata, `throttle_check()` fa `atomic_inc_return(&call_count)`.
   Se il valore supera `max_calls`, il thread si blocca su `throttle_wq` fino al prossimo tick.
-
-`CLOCK_MONOTONIC` invece di `CLOCK_REALTIME` per essere immune agli aggiustamenti NTP.
-
-**Misurazione del delay:** il modulo misura il ritardo indotto dal throttling come tempo
-trascorso dentro `throttle_wq`. `orig_fn(regs)` viene chiamata **dopo** la misurazione,
-quindi il tempo di attesa I/O della syscall non entra mai nelle statistiche di throttling.
 
 ### 6. Syscall bloccanti vs non bloccanti
 
@@ -359,21 +326,21 @@ due fasi di blocco indipendenti: il throttling (misurato) e l'attesa I/O dentro 
 
 ### 7. Prevenzione del thundering herd
 
-Un semplice `wake_up_all()` al tick del timer sveglierebbe tutti i thread in attesa:
-con 1000 thread e `max_calls=100`, 900 si risvegliano inutilmente e tornano subito a dormire.
+Una semplice `wake_up_all()` chiamata ogni volta sveglierebbe tutti i thread in attesa creando il seguente problema:
+con 1000 thread e `max_calls=100`, 900 si risveglierebbero inutilmente tornando subito a dormire.
 
-**Soluzione:** due meccanismi cooperanti:
+**Soluzione:** tramite due meccanismi cooperanti:
 - I thread si bloccano con `wait_event_interruptible_exclusive()` — marcati come *esclusivi*
   nella wait queue.
 - Il timer chiama `wake_up_nr(&throttle_wq, max_calls)` — sveglia esattamente tanti thread
   quanti sono gli slot disponibili nella nuova finestra.
 
-I thread svegli devono comunque ricontrollare il contatore: se un altro thread ha già
-occupato lo slot, tornano a dormire fino al tick successivo.
+I thread svegliati controllano comunque il contatore: nel caso un altro thread avesse già
+occupato lo slot, torneranno a dormire fino al tick successivo.
 
 ### 8. Drain protocol per lo scaricamento sicuro
 
-`try_module_get()` non è utilizzabile: i thread possono dormire dentro `generic_sct_wrapper`
+`try_module_get()` non è utilizzabile (nonostate un iniziale tentativo) poichè i thread possono dormire dentro `generic_sct_wrapper`
 (bloccati in `throttle_check()`), impedendo per sempre lo scaricamento del modulo.
 La soluzione è un **drain manuale**: `throttle_exit()` attende che tutti i thread
 in-flight escano naturalmente.
@@ -383,7 +350,7 @@ throttle_exit():
   1. module_unloading=1 + wake_up_all(throttle_wq)  → sblocca i thread in attesa
   2. remove_all_hooks()                              → nessun nuovo thread entra nel wrapper
   3. synchronize_rcu()                               → attende che tutti i CPU vedano la rimozione
-  4. wait_event(unload_wq, active_threads==0)        → drain: attende i thread in-flight
+  4. wait_event(unload_wq, active_threads==0)        → drain: attende i thread in-flight nei cpu
   5. synchronize_rcu()                               → barriera finale
   6. restore_x64_sys_call()                          → ripristina e libera lo stub
 ```
