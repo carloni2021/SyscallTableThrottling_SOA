@@ -125,7 +125,7 @@ static void *t1_worker(void *arg)
     return NULL;
 }
 
-static int test_blocking(int drv_fd, const char *progpath,
+static int test_blocking(const char *progpath,
                          int nworkers, int duration, int max_val)
 {
     int  result   = 1;           /* assume FAIL finché non verificato */
@@ -133,6 +133,7 @@ static int test_blocking(int drv_fd, const char *progpath,
     int  sys_ok   = 0;
     int  sys_nr   = SYS_read;
     int  mon_val  = 1;
+    int  drv_fd   = -1;
 
     printf("\n========================================\n");
     printf("  TEST 1: syscall bloccante — read(2)\n");
@@ -145,7 +146,10 @@ static int test_blocking(int drv_fd, const char *progpath,
     t1_zerofd = open("/dev/zero", O_RDONLY);
     if (t1_zerofd < 0) { perror("open /dev/zero"); return -1; }
 
-    /* ---- Configura il driver ---- */
+    /* ---- Apri il device e configura il driver ---- */
+    drv_fd = open(DEVICE_PATH, O_RDWR);
+    if (drv_fd < 0) { perror("open " DEVICE_PATH); close(t1_zerofd); return -1; }
+
     if (ioctl(drv_fd, IOCTL_ADD_PROG, progpath) < 0) { perror("ADD_PROG"); goto cleanup; }
     prog_ok = 1;
     if (ioctl(drv_fd, IOCTL_ADD_SYSCALL, &sys_nr)  < 0) { perror("ADD_SYSCALL"); goto cleanup; }
@@ -161,52 +165,67 @@ static int test_blocking(int drv_fd, const char *progpath,
 
     /* Warmup: lascia scadere la finestra parziale del driver (vedi throttleTest.c) */
     sleep(1);
-    /* Reset statistiche dopo il warmup: le finestre successive vengono
-     * misurate dal driver, allineate ai propri boundary. */
     ioctl(drv_fd, IOCTL_RESET_STATS, NULL);
 
-    sleep(duration);
+    /* ---- Chiudi il fd prima della finestra di misura ----
+     * Stesso pattern di throttleTest.c: senza fd aperto rmmod può
+     * eseguire module_exit e il drain protocol viene esercitato davvero. */
+    close(drv_fd);
+    drv_fd = -1;
+
+    sleep(duration);  /* <-- nessun fd aperto in questa finestra */
 
     /* ---- Ferma i thread ---- */
     t1_running = 0;
-    { int off = 0; ioctl(drv_fd, IOCTL_SET_MONITOR, &off); }
+    drv_fd = open(DEVICE_PATH, O_RDWR);
+    if (drv_fd >= 0) {
+        int off = 0; ioctl(drv_fd, IOCTL_SET_MONITOR, &off);
+    } else {
+        printf("\n[TEST 1] modulo rimosso durante il test —"
+               " il drain protocol è stato esercitato.\n");
+    }
     for (int i = 0; i < nworkers; i++)
         pthread_join(th[i], NULL);
     free(th);
 
     /* ---- Statistiche driver ---- */
     struct throttle_stats st = {0};
-    ioctl(drv_fd, IOCTL_GET_STATS, &st);
+    if (drv_fd >= 0) ioctl(drv_fd, IOCTL_GET_STATS, &st);
 
     /* ---- Verifica basata su statistiche driver (allineate all'hrtimer) ---- */
-    int pass_avg  = (st.avg_calls_per_window  <= (long)max_val);
-    int pass_wins = (st.peak_calls_per_window <= (long)max_val);
+    int pass_avg  = (drv_fd >= 0) && (st.avg_calls_per_window  <= (long)max_val);
+    int pass_wins = (drv_fd >= 0) && (st.peak_calls_per_window <= (long)max_val);
     result = (pass_avg && pass_wins) ? 0 : 1;
 
-    printf("\n  -- Statistiche driver (per-finestra, allineate all'hrtimer) --\n");
-    printf("  Peak calls/finestra : %ld\n",   st.peak_calls_per_window);
-    printf("  Avg  calls/finestra : %ld\n",   st.avg_calls_per_window);
-    printf("  Totale chiamate     : %lld in %d s (misurato dal driver)\n",
-           st.total_calls, duration);
-    printf("  Peak delay          : %lld ns (%.3f ms)\n",
-           st.peak_delay_ns, st.peak_delay_ns / 1e6);
-    printf("  Avg  delay          : %lld ns (%.3f ms)\n",
-           st.avg_delay_ns, st.avg_delay_ns / 1e6);
-    printf("  Peak delay prog     : '%s'  uid=%u\n",
-           st.peak_delay_prog, st.peak_delay_uid);
-    printf("  Peak bloccati       : %ld thread\n", st.peak_blocked_threads);
-    printf("  Avg  bloccati       : %ld thread\n", st.avg_blocked_threads);
+    if (drv_fd >= 0) {
+        printf("\n  -- Statistiche driver (per-finestra, allineate all'hrtimer) --\n");
+        printf("  Peak calls/finestra : %ld\n",   st.peak_calls_per_window);
+        printf("  Avg  calls/finestra : %ld\n",   st.avg_calls_per_window);
+        printf("  Totale chiamate     : %lld in %d s (misurato dal driver)\n",
+               st.total_calls, duration);
+        printf("  Peak delay          : %lld ns (%.3f ms)\n",
+               st.peak_delay_ns, st.peak_delay_ns / 1e6);
+        printf("  Avg  delay          : %lld ns (%.3f ms)\n",
+               st.avg_delay_ns, st.avg_delay_ns / 1e6);
+        printf("  Peak delay prog     : '%s'  uid=%u\n",
+               st.peak_delay_prog, st.peak_delay_uid);
+        printf("  Peak bloccati       : %ld thread\n", st.peak_blocked_threads);
+        printf("  Avg  bloccati       : %ld thread\n", st.avg_blocked_threads);
 
-    printf("\n  -- Verifica (basata su statistiche driver) --\n");
-    printf("  Avg/finestra <= MAX (%d): %s  (%ld)\n",
-           max_val, pass_avg  ? "PASS" : "FAIL", st.avg_calls_per_window);
-    printf("  Peak/finestra <= MAX (%d): %s  (%ld)\n",
-           max_val, pass_wins ? "PASS" : "FAIL", st.peak_calls_per_window);
+        printf("\n  -- Verifica (basata su statistiche driver) --\n");
+        printf("  Avg/finestra <= MAX (%d): %s  (%ld)\n",
+               max_val, pass_avg  ? "PASS" : "FAIL", st.avg_calls_per_window);
+        printf("  Peak/finestra <= MAX (%d): %s  (%ld)\n",
+               max_val, pass_wins ? "PASS" : "FAIL", st.peak_calls_per_window);
+    }
 
 cleanup:
-    { int off = 0; ioctl(drv_fd, IOCTL_SET_MONITOR, &off); }
-    if (sys_ok)  ioctl(drv_fd, IOCTL_DEL_SYSCALL, &sys_nr);
-    if (prog_ok) ioctl(drv_fd, IOCTL_DEL_PROG, progpath);
+    if (drv_fd >= 0) {
+        int off = 0; ioctl(drv_fd, IOCTL_SET_MONITOR, &off);
+        if (sys_ok)  ioctl(drv_fd, IOCTL_DEL_SYSCALL, &sys_nr);
+        if (prog_ok) ioctl(drv_fd, IOCTL_DEL_PROG, progpath);
+        close(drv_fd);
+    }
     close(t1_zerofd);
     return result;
 }
@@ -280,13 +299,14 @@ static void run_control_child(int drv_fd, struct t2_shared *sh)
     exit(0);
 }
 
-static int test_uid(int drv_fd, int nworkers, int duration, int max_val)
+static int test_uid(int nworkers, int duration, int max_val)
 {
     int  result  = 1;
     int  uid_ok  = 0;
     int  sys_ok  = 0;
     int  sys_nr  = SYS_getpid;
     int  mon_val = 1;
+    int  drv_fd  = -1;
     unsigned int tuid = TARGET_UID;
 
     /* Numero di processi per gruppo: stesso numero di worker */
@@ -305,6 +325,10 @@ static int test_uid(int drv_fd, int nworkers, int duration, int max_val)
     printf("  Durata          : %d s  |  MAX = %d inv/s\n\n",
            duration, max_val);
 
+    /* ---- Apri il device ---- */
+    drv_fd = open(DEVICE_PATH, O_RDWR);
+    if (drv_fd < 0) { perror("open " DEVICE_PATH); return -1; }
+
     /* ---- Alloca stato condiviso (padre + tutti i figli) ----
      * fork() copia lo spazio di memoria: senza memoria condivisa ogni figlio
      * avrebbe il suo contatore isolato. MAP_SHARED|MAP_ANONYMOUS mappa le
@@ -313,7 +337,7 @@ static int test_uid(int drv_fd, int nworkers, int duration, int max_val)
     struct t2_shared *sh = mmap(NULL, sizeof(*sh),
                                 PROT_READ | PROT_WRITE,
                                 MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-    if (sh == MAP_FAILED) { perror("mmap"); return -1; }
+    if (sh == MAP_FAILED) { perror("mmap"); close(drv_fd); return -1; }
     atomic_init(&sh->throttled_calls, 0);
     atomic_init(&sh->control_calls,   0);
     atomic_init(&sh->running,         1);
@@ -353,83 +377,91 @@ static int test_uid(int drv_fd, int nworkers, int duration, int max_val)
     sleep(1);
     ioctl(drv_fd, IOCTL_RESET_STATS, NULL);
 
+    /* ---- Chiudi il fd prima della finestra di misura ----
+     * I figli hanno già chiuso la loro copia di drv_fd in run_*_child().
+     * Chiudendo anche la copia del padre, il refcount scende a 0 e rmmod
+     * può eseguire module_exit con il drain protocol attivo. */
+    close(drv_fd);
+    drv_fd = -1;
+
     /* ---- Misurazione throughput ---- */
     long base_ctl = atomic_load(&sh->control_calls);
 
-    sleep(duration);
+    sleep(duration);  /* <-- nessun fd aperto in questa finestra */
 
-    /* Cattura il totale del gruppo control prima di fermare i processi:
-     * dopo IOCTL_SET_MONITOR(0) i processi throttled bloccati si svegliano
-     * senza limiti e gonfierebbero il conteggio. Il gruppo control non è
-     * soggetto a throttling quindi il suo contatore è già affidabile. */
     long total_ctl = atomic_load(&sh->control_calls) - base_ctl;
 
     /* ---- Ferma i processi figlio ----
      *
      * Ordine deliberato:
      *   1. Segnala ai figli di terminare (running=0).
-     *   2. Disabilita il monitor: wake_up_all() nel kernel sveglia
-     *      i thread del gruppo throttled eventualmente bloccati nella
-     *      wait_queue, così possono uscire dal loop e fare exit().
+     *   2. Riapri il fd e disabilita il monitor: wake_up_all() nel kernel
+     *      sveglia i processi throttled bloccati nella wait_queue.
+     *      Se il modulo è stato rimosso, open() fallisce ma i figli si
+     *      sono già svegliati grazie a module_unloading.
      *   3. waitpid() attende il completamento ordinato di tutti i figli.
      */
     atomic_store(&sh->running, 0);
-    { int off = 0; ioctl(drv_fd, IOCTL_SET_MONITOR, &off); }
+    drv_fd = open(DEVICE_PATH, O_RDWR);
+    if (drv_fd >= 0) {
+        int off = 0; ioctl(drv_fd, IOCTL_SET_MONITOR, &off);
+    } else {
+        printf("\n[TEST 2] modulo rimosso durante il test —"
+               " il drain protocol è stato esercitato.\n");
+    }
     for (int i = 0; i < n_throttled + n_control; i++)
         if (pids[i] > 0) waitpid(pids[i], NULL, 0);
     free(pids);
 
     /* ---- Statistiche driver ---- */
     struct throttle_stats st = {0};
-    ioctl(drv_fd, IOCTL_GET_STATS, &st);
+    if (drv_fd >= 0) ioctl(drv_fd, IOCTL_GET_STATS, &st);
 
     /* ---- Verifica ---- */
     double avg_ctl    = (double)total_ctl / duration;
 
-    /* Throttled: usa driver stats (allineate all'hrtimer, immune al drift) */
-    int pass_thr_avg  = (st.avg_calls_per_window  <= (long)max_val);
-    int pass_thr_wins = (st.peak_calls_per_window <= (long)max_val);
-
-    /*
-     * Control: il driver non monitora CONTROL_UID, quindi la misura
-     * deve restare userspace. Il rate deve essere significativamente
-     * superiore a MAX per dimostrare che il throttling è selettivo.
-     */
+    int pass_thr_avg  = (drv_fd >= 0) && (st.avg_calls_per_window  <= (long)max_val);
+    int pass_thr_wins = (drv_fd >= 0) && (st.peak_calls_per_window <= (long)max_val);
     int pass_ctl_free = (avg_ctl > max_val * 5.0);
 
-    printf("\n  -- Statistiche driver (gruppo throttled, allineate all'hrtimer) --\n");
-    printf("  Peak calls/finestra : %ld\n",   st.peak_calls_per_window);
-    printf("  Avg  calls/finestra : %ld\n",   st.avg_calls_per_window);
-    printf("  Peak delay          : %lld ns (%.3f ms)\n",
-           st.peak_delay_ns, st.peak_delay_ns / 1e6);
-    printf("  Avg  delay          : %lld ns (%.3f ms)\n",
-           st.avg_delay_ns, st.avg_delay_ns / 1e6);
-    printf("  Peak delay prog     : '%s'  uid=%u\n",
-           st.peak_delay_prog, st.peak_delay_uid);
-    printf("  Peak bloccati       : %ld processi\n", st.peak_blocked_threads);
-    printf("  Avg  bloccati       : %ld processi\n", st.avg_blocked_threads);
+    if (drv_fd >= 0) {
+        printf("\n  -- Statistiche driver (gruppo throttled, allineate all'hrtimer) --\n");
+        printf("  Peak calls/finestra : %ld\n",   st.peak_calls_per_window);
+        printf("  Avg  calls/finestra : %ld\n",   st.avg_calls_per_window);
+        printf("  Peak delay          : %lld ns (%.3f ms)\n",
+               st.peak_delay_ns, st.peak_delay_ns / 1e6);
+        printf("  Avg  delay          : %lld ns (%.3f ms)\n",
+               st.avg_delay_ns, st.avg_delay_ns / 1e6);
+        printf("  Peak delay prog     : '%s'  uid=%u\n",
+               st.peak_delay_prog, st.peak_delay_uid);
+        printf("  Peak bloccati       : %ld processi\n", st.peak_blocked_threads);
+        printf("  Avg  bloccati       : %ld processi\n", st.avg_blocked_threads);
 
-    printf("\n  -- Confronto gruppi --\n");
-    printf("  Gruppo throttled (uid=%u): avg %ld calls/s (driver)\n",
-           TARGET_UID, st.avg_calls_per_window);
-    printf("  Gruppo control   (uid=%u): avg %.1f calls/s (userspace)\n",
-           CONTROL_UID, avg_ctl);
-    printf("  Rapporto control/throttled: %.1fx\n",
-           st.avg_calls_per_window > 0 ? avg_ctl / st.avg_calls_per_window : 0.0);
+        printf("\n  -- Confronto gruppi --\n");
+        printf("  Gruppo throttled (uid=%u): avg %ld calls/s (driver)\n",
+               TARGET_UID, st.avg_calls_per_window);
+        printf("  Gruppo control   (uid=%u): avg %.1f calls/s (userspace)\n",
+               CONTROL_UID, avg_ctl);
+        printf("  Rapporto control/throttled: %.1fx\n",
+               st.avg_calls_per_window > 0 ? avg_ctl / st.avg_calls_per_window : 0.0);
 
-    printf("\n  -- Verifica --\n");
-    printf("  Throttled avg/finestra <= MAX (%d): %s  (%ld)\n",
-           max_val, pass_thr_avg  ? "PASS" : "FAIL", st.avg_calls_per_window);
-    printf("  Throttled peak/finestra <= MAX (%d): %s  (%ld)\n",
-           max_val, pass_thr_wins ? "PASS" : "FAIL", st.peak_calls_per_window);
-    printf("  Control media (%.1f) > MAX*5 (%d): %s\n",
-           avg_ctl, max_val * 5, pass_ctl_free ? "PASS" : "FAIL");
+        printf("\n  -- Verifica --\n");
+        printf("  Throttled avg/finestra <= MAX (%d): %s  (%ld)\n",
+               max_val, pass_thr_avg  ? "PASS" : "FAIL", st.avg_calls_per_window);
+        printf("  Throttled peak/finestra <= MAX (%d): %s  (%ld)\n",
+               max_val, pass_thr_wins ? "PASS" : "FAIL", st.peak_calls_per_window);
+        printf("  Control media (%.1f) > MAX*5 (%d): %s\n",
+               avg_ctl, max_val * 5, pass_ctl_free ? "PASS" : "FAIL");
+    }
 
     result = (pass_thr_avg && pass_thr_wins && pass_ctl_free) ? 0 : 1;
 
 cleanup_mmap:
-    if (sys_ok) ioctl(drv_fd, IOCTL_DEL_SYSCALL, &sys_nr);
-    if (uid_ok) ioctl(drv_fd, IOCTL_DEL_UID,     &tuid);
+    if (drv_fd >= 0) {
+        if (sys_ok) ioctl(drv_fd, IOCTL_DEL_SYSCALL, &sys_nr);
+        if (uid_ok) ioctl(drv_fd, IOCTL_DEL_UID,     &tuid);
+        close(drv_fd);
+    }
     munmap(sh, sizeof(*sh));
     return result;
 }
@@ -460,10 +492,6 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    /* ---- Apertura device ---- */
-    int drv_fd = open(DEVICE_PATH, O_RDWR);
-    if (drv_fd < 0) { perror("open " DEVICE_PATH); return 1; }
-
     /*
      * Path del binario: il kernel identifica l'eseguibile tramite inode/device
      * ricavati da mm->exe_file. Passiamo il path assoluto letto da
@@ -471,8 +499,7 @@ int main(int argc, char *argv[])
      */
     char progpath[PROG_PATH_MAX] = {0};
     if (readlink("/proc/self/exe", progpath, PROG_PATH_MAX - 1) < 0) {
-        perror("readlink /proc/self/exe");
-        close(drv_fd); return 1;
+        perror("readlink /proc/self/exe"); return 1;
     }
 
     printf("=========================================\n");
@@ -484,11 +511,11 @@ int main(int argc, char *argv[])
            nworkers, duration, max_val);
     printf("=========================================\n");
 
-    /* ---- Esecuzione dei test ---- */
-    int r1 = test_blocking(drv_fd, progpath, nworkers, duration, max_val);
-    int r2 = test_uid     (drv_fd,           nworkers, duration, max_val);
-
-    close(drv_fd);
+    /* ---- Esecuzione dei test ----
+     * Ogni test apre e chiude il fd autonomamente: il fd viene chiuso
+     * prima di sleep(duration) così rmmod può funzionare mid-test. */
+    int r1 = test_blocking(progpath, nworkers, duration, max_val);
+    int r2 = test_uid     (         nworkers, duration, max_val);
 
     /* ---- Riepilogo finale ---- */
     printf("\n=========================================\n");
