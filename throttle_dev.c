@@ -351,8 +351,7 @@ static ssize_t dev_read(struct file *filep, char __user *buf,
 
 // Struttura file_operations che definisce le operazioni supportate dal device, inclusa la gestione degli IOCTL.
 static const struct file_operations fops = {
-    /* .owner rimosso intenzionalmente: il drain protocol in throttle_exit
-     * garantisce la sicurezza sull'unload senza bloccare rmmod */
+    .owner          = THIS_MODULE,
     .open           = dev_open,
     .release        = dev_release,
     .read           = dev_read,

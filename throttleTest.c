@@ -2,15 +2,20 @@
  * throttleTest.c — test autonomo per throttleDriver
  *
  * Il programma:
- *   1. Apre /dev/throttleDriver e configura il driver (registra se stesso
- *      come prog, registra la syscall, imposta MAX, abilita il monitor)
- *   2. Lancia N thread che invocano la syscall al ritmo richiesto
- *   3. Al termine legge le statistiche dal driver
- *   4. Verifica automaticamente che il throttling abbia funzionato
- *   5. Ripristina la configurazione del driver e stampa PASS / FAIL
+ *   1. Apre /dev/throttleDriver, configura il driver, esegue il warmup,
+ *      poi CHIUDE il fd prima di iniziare la finestra di misura.
+ *      Questo permette a rmmod di rimuovere il modulo durante il test
+ *      (il drain protocol in throttle_exit viene così effettivamente
+ *      esercitato, come da progetto).
+ *   2. Lancia N thread che invocano la syscall al ritmo richiesto.
+ *      Durante sleep(duration) nessun fd è tenuto aperto.
+ *   3. Al termine riapre il device (se ancora presente) per leggere
+ *      le statistiche e fare cleanup.
+ *   4. Verifica automaticamente che il throttling abbia funzionato.
+ *   5. Stampa PASS / FAIL.
  *
  * Uso:
- *   sudo ./throttleTest <num_thread> <durata_sec> <MAX> [rate_per_thread]
+ *   sudo ./throttleTest <num_thread> <durata_sec> <MAX> [rate_per_thread] [monitor_on]
  *
  * Esempio:
  *   sudo ./throttleTest 8 6 200          — thread a velocità massima
@@ -21,6 +26,9 @@
  *   - La syscall testata è getpid() (nr=39 su x86-64): veloce, non
  *     bloccante, ideale per saturare il rate limiter.
  *   - Il cleanup viene eseguito anche in caso di errore.
+ *   - Se il modulo viene rimosso durante il test, i thread escono dal
+ *     throttling (module_unloading li sveglia) e continuano a girare
+ *     senza limitazioni fino alla fine di sleep(duration).
  */
 
 #include <stdio.h>
@@ -246,6 +254,15 @@ int main(int argc, char *argv[])
      * boundary di finestra. */
     ioctl(fd, IOCTL_RESET_STATS, NULL);
 
+    /* ---- Chiudi il fd prima della finestra di misura ----
+     * Con .owner = THIS_MODULE il modulo non può essere rimosso finché
+     * un fd è aperto. Chiudendolo ora, rmmod può funzionare durante il
+     * test: module_exit sveglia i thread bloccati in throttle_check e il
+     * drain protocol viene effettivamente esercitato. Il fd viene riaperto
+     * dopo sleep(duration) solo per leggere le statistiche e fare cleanup. */
+    close(fd);
+    fd = -1;
+
     /* ---- Esecuzione del test ---- */
     long baseline = atomic_load(&total_calls);  /* baseline post-warmup */
 
@@ -253,29 +270,39 @@ int main(int argc, char *argv[])
     clock_gettime(CLOCK_MONOTONIC, &ts_start);
     printf("  Inizio : %ld.%09ld s\n", ts_start.tv_sec, ts_start.tv_nsec);
 
-    sleep(duration);
+    sleep(duration);  /* <-- nessun fd aperto in questa finestra */
 
     clock_gettime(CLOCK_MONOTONIC, &ts_end);
     printf("  Fine   : %ld.%09ld s\n", ts_end.tv_sec, ts_end.tv_nsec);
 
-    /* Cattura il totale prima di fermare i thread: dopo IOCTL_SET_MONITOR(0)
-     * i thread bloccati vengono svegliati senza throttling e farebbero
-     * chiamate extra che gonfierebbero il conteggio. */
+    /* Cattura il totale prima di fermare i thread */
     long total = atomic_load(&total_calls) - baseline;
 
-    /* ---- Ferma i thread ---- */
+    /* ---- Ferma i thread ----
+     * Riapriamo il fd per spegnere il monitor (sveglia i thread bloccati
+     * in throttle_check) e leggere le statistiche.
+     * Se il modulo è stato rimosso durante il test, open() fallisce:
+     * i thread si sono già svegliati grazie a module_unloading. */
     running = 0;
-    { int val = 0; ioctl(fd, IOCTL_SET_MONITOR, &val); }
+    fd = open(DEVICE_PATH, O_RDWR);
+    if (fd >= 0) {
+        int val = 0;
+        ioctl(fd, IOCTL_SET_MONITOR, &val);
+    } else {
+        printf("\n[throttleTest] modulo rimosso durante il test —"
+               " il drain protocol è stato esercitato.\n");
+    }
     for (int i = 0; i < num_threads; i++)
         pthread_join(threads[i], NULL);
 
     /* ---- Statistiche dal driver ---- */
     struct throttle_stats stats;
-    int got_stats = (ioctl(fd, IOCTL_GET_STATS, &stats) == 0);
-
-    /* ---- Cleanup driver ---- */
-    do_cleanup(fd, progpath);
-    close(fd);
+    int got_stats = 0;
+    if (fd >= 0) {
+        got_stats = (ioctl(fd, IOCTL_GET_STATS, &stats) == 0);
+        do_cleanup(fd, progpath);
+        close(fd);
+    }
 
     /* ================================================================
      *  Verifica automatica del throttling
