@@ -277,7 +277,9 @@ Lo stub è esterno al modulo perché la memoria del modulo viene liberata dopo
 dopo.
 
 Su kernel ≥ 6.4, `execmem_alloc`, `execmem_free` e `set_memory_x` non sono più
-esportate e vengono risolte a runtime con lo stesso helper kprobe.
+esportate e vengono risolte a runtime con lo stesso helper kprobe (registra una kprobe sul nome del simbolo, legge `kp.addr`, deregistra subito — zero
+overhead a runtime): se anche uno solo dei tre fallisce, il patching di `x64_sys_call`
+viene saltato con un warning non fatale.
 
 ### 3. Identificazione del processo tramite inode
 
