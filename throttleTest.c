@@ -161,8 +161,8 @@ int main(int argc, char *argv[])
         fprintf(stderr, "Errore: num_thread, durata_sec e MAX devono essere > 0.\n");
         return 1;
     }
-    if (argc >= 5 && rate_per_thread <= 0) {
-        fprintf(stderr, "Errore: rate_per_thread deve essere > 0.\n");
+    if (argc >= 5 && rate_per_thread < 0) {
+        fprintf(stderr, "Errore: rate_per_thread deve essere >= 0 (0 = massima velocita').\n");
         return 1;
     }
 

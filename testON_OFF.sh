@@ -69,7 +69,7 @@ echo ""
 #  Run 1: monitor OFF — hook attivi, nessun throttling
 # ----------------------------------------------------------------
 echo "[1/2] Baseline (monitor OFF, MAX=$MAX) ..."
-out_base=$("$THROTTLE_TEST" "$THREADS" "$DURATA" "$MAX" 0 2>&1) || true
+out_base=$("$THROTTLE_TEST" "$THREADS" "$DURATA" "$MAX" 0 0 2>&1) || true
 
 b_avg_calls=$(estrai_avg_calls  "$out_base")
 b_peak_calls=$(estrai_peak_calls "$out_base")
