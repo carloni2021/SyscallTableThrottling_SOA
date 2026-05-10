@@ -51,7 +51,7 @@ N=0
 echo "========================================================"
 echo "  testCSV — campagna throttleDriver"
 echo "========================================================"
-echo "  Matrice  : ${#THREADS[@]} thread × ${#MAX_VALUES[@]} MAX = $TOTALE run"
+echo "  $TOTALE run"
 echo "  Durata   : ${DURATA}s per run"
 echo "  Output   : $OUTPUT"
 echo "========================================================"
