@@ -108,12 +108,14 @@ static int sct_validate_page(unsigned long *addr)
     return 0;
 }
 
-// Scansiona il virtual address space da SCT_START a SCT_MAX, pagina per pagina, per trovare sys_call_table tramite sct_validate_page che viene lanciata se la pagina è mappata.
+// Scansiona il virtual address space da SCT_START a SCT_MAX, pagina per pagina, 
+// per trovare sys_call_table tramite sct_validate_page che viene lanciata se la pagina è mappata.
 //  Restituisce 0 se trovata, -ENOENT altrimenti.
 int find_sys_call_table(void)
 {
     unsigned long k;
     for (k = SCT_START; k < SCT_MAX; k += PAGE_SIZE) {
+        //sys_vtpmo definito in throttle_mem per il walr hardware
         if (sys_vtpmo(k) != NO_MAP) {
             if (sct_validate_page((unsigned long *)k)) {
                 printk(KERN_INFO "<throttle>: sys_call_table @ %px\n",

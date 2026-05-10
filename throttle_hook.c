@@ -11,6 +11,12 @@
  *   con generic_sct_wrapper e viceversa.
  */
 
+
+ //NOTA BENE
+ //orig_fn puntatore alla syscall originale
+ //orig_ax numero syscall (sarebbe il valore del registro rax)
+ 
+ 
 #include "throttle.h"
 
 struct hook_entry {
@@ -50,7 +56,7 @@ static asmlinkage long generic_sct_wrapper(const struct pt_regs *regs)
     * mentre un altro thread sta rimuovendo l'hook
     */
 
-    //se orgig_fn null allora la syscall non è più hookata (es. è stata rimossa mentre eravamo in throttle_check)
+    //se orig_fn null allora la syscall non è più hookata (es. è stata rimossa mentre eravamo in throttle_check)
     if (!orig_fn) {
         ret = (sys_call_table_ptr && nr < NR_syscalls)
         //controlla se sys_call_table_ptr è valido e nr è un numero di syscall valido, se sì chiama direttamente la syscall originale senza wrapper, altrimenti ritorna -ENOSYS
@@ -62,6 +68,7 @@ static asmlinkage long generic_sct_wrapper(const struct pt_regs *regs)
         return ret;
     }
 
+    //check se può essere eseguito
     throttle_check(nr);
 
     /* Il drain segnala completamento DOPO orig_fn: il decremento deve avvenire
@@ -78,6 +85,7 @@ static asmlinkage long generic_sct_wrapper(const struct pt_regs *regs)
 // Installa un hook sulla syscall nr: sostituisce sys_call_table[nr] con generic_sct_wrapper e salva l'handler originale in hooks[]. Ritorna 0 se successo, -ENODEV se sys_call_table non trovata, -ENOMEM se non ci sono slot liberi per nuovi hook.
 int install_hook(int nr)
 {
+    //contesto di processo perchè chiamato dall'ioctl_handler : può dormire -> mutex
     int i;
 
     if (!sys_call_table_ptr) return -ENODEV;

@@ -93,7 +93,7 @@ sudo ./throttleClient reset_stats  # azzera le statistiche
 
 **5. Listing:**
 
-La lista dei filtri registrati non avviene tramite ioctl ma tramite `read()` sul device,
+La lista dei filtri registrati è un interazione particolare poichè non avviene tramite ioctl ma tramite `read()` sul device,
 in modo di evitare limiti di dimensione fissi:
 
 ```bash
@@ -106,18 +106,18 @@ in modo di evitare limiti di dimensione fissi:
 
 ### Piattaforma
 
-Il modulo è sviluppato e testato su **Linux ≥ 5.15 / x86-64**. Le scelte realizzative
+Il modulo è sviluppato e testato su **Linux 6.17 / x86-64**. Le scelte realizzative
 non portabili riguardano:
 
 - Ricerca della `sys_call_table` tramite page-table walk hardware da `CR3` (PML4→PDP→PDE→PTE).
-- Patching di `x64_sys_call` su kernel ≥ 5.15 in particolare (6.17), dove il dispatch non usa più la SCT direttamente.
+- Patching di `x64_sys_call` su kernel ≥ 5.15, dove il dispatch non usa più la SCT direttamente.
 - Stub esterno allocato con `module_alloc()` fuori dalla memoria del modulo.
 - Bypass di `CR0.WP` e `CR4.CET` tramite assembly inline per scrivere in memoria read-only.
 - `hrtimer` con `CLOCK_MONOTONIC` per il reset della finestra di throttling.
 
 ### Requisiti
 
-- Linux Kernel 5.x o superiore con headers installati
+- Linux Kernel 6.17 o superiore con headers installati
 - GCC, Make
 - Architettura x86-64
 - Privilegi root per caricare il modulo e configurarlo
@@ -135,7 +135,7 @@ non portabili riguardano:
 
 ## Test e Validazione
 
-Sono forniti due programmi di test, ciascuno auto-configurante: aprono il device,
+Sono forniti dei programmi di test, ciascuno auto-configurante: aprono il device,
 registrano sé stessi, eseguono il test e puliscono la configurazione al termine.
 
 ### throttleTest — Syscall non bloccante, multi-thread
@@ -202,23 +202,24 @@ threads,MAX,avg_calls_finestra,peak_calls_finestra,avg_delay_ns,peak_delay_ns,av
 Permette di analizzare come throughput, delay e thread bloccati variano al variare
 del carico e del limite configurato.
 
-### testON_OFF.sh — confronto baseline vs throttling attivo
+### testUnload.sh — verifica del drain protocol durante rmmod
 
 ```bash
-sudo ./testON_OFF.sh <num_thread> <durata_sec> <MAX>
+sudo ./testUnload.sh [num_thread] [timeout_sec]
 
 # Esempio:
-sudo ./testON_OFF.sh 4 6 50
+sudo ./testUnload.sh 8 5
 ```
 
-Esegue `throttleTest` due volte con lo stesso MAX:
+Verifica che il drain protocol funzioni correttamente quando `rmmod` viene eseguito
+mentre dei thread sono bloccati in `throttle_check`:
 
-- **Run 1 — Baseline**: monitor OFF — hook installati ma nessun blocco. Misura l'overhead
-  puro degli hook senza throttling attivo.
-- **Run 2 — Throttling attivo**: monitor ON — misura il rate limiting in azione.
+1. Avvia N thread con `MAX=1` — quasi tutti bloccati in `throttle_wq`.
+2. Dopo 2s esegue `rmmod` e misura il tempo di unload.
+3. Verifica che il modulo venga rimosso entro `timeout_sec`.
+4. Ricarica il modulo per lasciare il sistema in stato pulito.
 
-Stampa i risultati affiancati per mostrare il costo aggiuntivo del blocking rispetto
-all'overhead di base degli hook.
+Stampa `PASS` se l'unload completa nei tempi e il modulo risulta effettivamente rimosso.
 
 ---
 
@@ -375,15 +376,6 @@ memoria fittizio `"+m"(__force_order)` che bypassa il CR pinning del kernel.
 `preempt_disable()` / `preempt_enable()` impedisce la migrazione del thread tra CPU
 (i registri CR sono per-CPU) durante la modifica.
 
-### Compatibilità versioni kernel
-
-| Range kernel | Percorso di dispatch | Comportamento del modulo |
-|---|---|---|
-| < 5.15 | `entry_SYSCALL_64 → sys_call_table[nr]` | Solo hook SCT |
-| ≥ 5.15, < 6.4 | `entry_SYSCALL_64 → x64_sys_call` | Hook SCT + patch `x64_sys_call` via `module_alloc` |
-| ≥ 6.4, < 6.15 | come sopra | Come sopra, ma `execmem_alloc/free/set_memory_x` risolti via kprobe |
-| ≥ 6.15 | come sopra | Come sopra + API `hrtimer_setup` |
-
 ---
 
 ## Struttura dei file
@@ -400,7 +392,7 @@ throttleClient.c       — tool di configurazione userspace
 throttleTest.c         — test multi-thread: syscall non bloccante (getpid), PASS/FAIL automatico
 throttleTest2.c        — test avanzato: syscall bloccante (read) + throttling per UID
 testCSV.sh             — campagna sistematica su matrice threads×MAX, output CSV
-testON_OFF.sh          — confronto baseline (hook senza limite) vs throttling attivo
+testUnload.sh          — verifica drain protocol durante rmmod con thread bloccati
 ```
 
 ---
